@@ -1,0 +1,29 @@
+name: Scheduled Backtest Audit
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Every Sunday at Midnight
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    env:
+      EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
+      EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Weekly Backtest
+        run: python scripts/run_backtest.py # Assumes you have a script for this
