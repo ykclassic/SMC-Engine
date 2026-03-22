@@ -1,6 +1,23 @@
+# --- Core Data & Exchange ---
 ccxt==4.2.34
 pandas==2.2.0
 numpy==1.26.3
 pyyaml==6.0.1
 python-dotenv==1.0.1
 requests==2.31.0
+
+# --- AI / Machine Learning ---
+torch==2.2.0
+torchvision==0.17.0
+scikit-learn==1.4.0
+transformers==4.37.2
+sentencepiece==0.1.99
+
+# --- Testing & DevOps ---
+pytest==8.0.0
+flake8==7.0.0
+pytest-mock==3.12.0
+
+# --- Monitoring & UI ---
+streamlit==1.31.0
+plotly==5.18.0
