@@ -1,4 +1,9 @@
 # Append these to your existing settings.yaml
+confluence:
+  require_macro_alignment: true   # Must trade in direction of 4H BOS
+  entry_confirmation: "sweep"     # Options: "sweep" (Liquidity) or "touch" (OB)
+  max_signal_age_candles: 3       # How many candles after a 15m BOS to alert
+# Append these to your existing settings.yaml
 discord:
   webhook_url: "YOUR_DISCORD_WEBHOOK_HERE" # Usually loaded via .env
   username: "Nexus SMC Bot"
