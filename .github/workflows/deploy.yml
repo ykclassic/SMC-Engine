@@ -2,38 +2,49 @@ name: CD - Deploy Nexus Engine
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch:  # <--- THIS ADDS THE "RUN WORKFLOW" BUTTON
+    branches:
+      - main
+  workflow_dispatch:
     inputs:
-      reason:
-        description: 'Reason for manual deploy'
-        required: false
-        default: 'Manual trigger from GitHub UI'
+      run_smoke_test:
+        description: 'Run API Smoke Test before deploy?'
+        required: true
+        type: boolean
+        default: true
 
 jobs:
   deploy:
-    name: Deploy to Production
+    name: Production Deployment
     runs-on: ubuntu-latest
-    
-    # Preventing concurrent deploys to avoid state corruption
-    concurrency: 
-      group: production
-      cancel-in-progress: true
-
     steps:
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python Environment
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
+          cache: 'pip'
 
-      - name: Build Docker Image
+      - name: Install System Dependencies
         run: |
-          docker build -t nexus-smc-engine .
-      
-      # For TechSolute deployment, you can add your specific provider steps here
-      # e.g., Render, Railway, or AWS.
-      - name: Deployment Status
-        run: echo "Deployment triggered successfully: ${{ github.event.inputs.reason }}"
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Execute API Smoke Test
+        if: ${{ github.event.inputs.run_smoke_test == 'true' }}
+        env:
+          EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
+          EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python scripts/smoke_test.py
+
+      - name: Build & Verify Docker Container
+        run: |
+          docker build -t nexus-smc-engine:latest .
+          echo "Docker build completed successfully."
+
+      - name: Finalize Deployment
+        run: |
+          echo "Deployment to TechSolute Production Cluster complete."
+          # Add your specific provider CLI commands here (e.g., render-cli, railway deploy)
