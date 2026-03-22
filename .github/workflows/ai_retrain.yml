@@ -1,0 +1,46 @@
+name: AI - Model Retraining Pipeline
+
+on:
+  schedule:
+    - cron: '0 0 * * 6' # Every Saturday at Midnight
+  workflow_dispatch: # Allows manual trigger for urgent updates
+
+jobs:
+  retrain-model:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: |
+          pip install torch pandas numpy scikit-learn
+          pip install -r requirements.txt
+
+      - name: Run Training Script
+        env:
+          EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
+          EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
+        run: python scripts/train_models.py
+
+      - name: Evaluate Model Performance
+        run: |
+          # Logic to check if the new model's accuracy is > 65%
+          # If it fails, the workflow stops here and sends an alert
+          python scripts/validate_model.py 
+
+      - name: Commit and Push New Weights
+        if: success()
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add models/weights/latest_gru.pth
+          git commit -m "🤖 AI: Automated Weekly Model Retrain [$(date +'%Y-%m-%d')]"
+          git push
