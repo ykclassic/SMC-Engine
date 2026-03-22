@@ -1,16 +1,83 @@
-# Append these to your existing settings.yaml
-confluence:
-  require_macro_alignment: true   # Must trade in direction of 4H BOS
-  entry_confirmation: "sweep"     # Options: "sweep" (Liquidity) or "touch" (OB)
-  max_signal_age_candles: 3       # How many candles after a 15m BOS to alert
-# Append these to your existing settings.yaml
-discord:
-  webhook_url: "YOUR_DISCORD_WEBHOOK_HERE" # Usually loaded via .env
-  username: "Nexus SMC Bot"
-  avatar_url: "https://your-logo-url.com/logo.png"
-  color_long: 0x00ff00 # Green
-  color_short: 0xff0000 # Red
+# ==========================================
+# Nexus-SMC-SignalEngine: Global Configuration
+# ==========================================
 
+project:
+  name: "Nexus-SMC-SignalEngine"
+  version: "1.0.0"
+  provider: "TechSolute"
+  environment: "production" # options: dev, staging, prod
+
+# ------------------------------------------
+# Data & Market Access
+# ------------------------------------------
+exchanges:
+  - name: "bitget"
+    enabled: true
+    options:
+      recvWindow: 5000
+      adjustForTimeDifference: true
+  - name: "gate_io"
+    enabled: false
+
+timeframes:
+  macro: "4h"       # Used for Trend Bias & Macro Order Blocks
+  micro: "15m"      # Used for Entry Execution & Liquidity Sweeps
+  data_limit: 500   # Number of historical candles to fetch
+
+# ------------------------------------------
+# Core SMC Logic Parameters
+# ------------------------------------------
+market_structure:
+  lookback_period: 5          # Candles needed to confirm a swing high/low
+  structure_type: "body_close" # 'body_close' for BOS, 'wick' for aggressive
+  confirmation_candles: 2     # Minimum candles for trend confirmation
+
+liquidity:
+  eq_threshold: 0.001         # 0.1% price difference to qualify as EQH/EQL
+  sweep_buffer: 0.0005        # Offset to confirm a liquidity grab
+  search_depth: 30            # How many previous fractals to check for liquidity
+
+imbalance:
+  min_gap_size: 0.0002        # Minimum % gap to qualify as a Fair Value Gap (FVG)
+  filter_mitigated: true      # Ignore FVGs already filled by price action
+
+order_blocks:
+  lookback_candles: 100       # Max candles to search for an origin OB
+  require_fvg: true           # OB must be coupled with an imbalance
+  mitigation_threshold: 0.5   # % of OB candle retrace to mark as mitigated
+
+# ------------------------------------------
+# Confluence & Signal Logic
+# ------------------------------------------
+confluence:
+  require_macro_alignment: true   # Only trade 15m signals in 4H direction
+  entry_confirmation: "sweep"     # Trigger on 'sweep' or simple zone 'touch'
+  max_signal_age_candles: 3       # Expiry for micro-signals after detection
+
+# ------------------------------------------
+# Risk & Execution
+# ------------------------------------------
 risk_management:
-  default_tp_rr: 3.0           # Default 1:3 Risk/Reward ratio
-  stop_loss_buffer: 0.001     # 0.1% buffer below/above Order Block
+  default_tp_rr: 3.0              # Target 1:3 Risk/Reward ratio
+  stop_loss_buffer_pct: 0.001     # 0.1% safety margin beyond OB structural limits
+  max_open_trades: 3              # Portfolio exposure limit
+  account_risk_per_trade: 0.01    # Risk 1% of equity per signal
+
+# ------------------------------------------
+# Alerting & Observability
+# ------------------------------------------
+alerts:
+  discord:
+    enabled: true
+    username: "Nexus Intelligence Suite"
+    avatar_url: "https://your-techsolute-logo.com/icon.png"
+    colors:
+      long: 0x00FF00   # Neon Green
+      short: 0xFF0000  # Neon Red
+      system: 0x5865F2 # Discord Blurple
+
+monitoring:
+  log_level: "INFO"
+  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  health_check_interval: 3600 # System status heartbeat (seconds)
