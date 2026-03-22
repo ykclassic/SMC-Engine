@@ -3,10 +3,23 @@ name: CD - Deploy Nexus Engine
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:  # <--- THIS ADDS THE "RUN WORKFLOW" BUTTON
+    inputs:
+      reason:
+        description: 'Reason for manual deploy'
+        required: false
+        default: 'Manual trigger from GitHub UI'
 
 jobs:
   deploy:
+    name: Deploy to Production
     runs-on: ubuntu-latest
+    
+    # Preventing concurrent deploys to avoid state corruption
+    concurrency: 
+      group: production
+      cancel-in-progress: true
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -20,14 +33,7 @@ jobs:
         run: |
           docker build -t nexus-smc-engine .
       
-      # Example for deploying to a VPS via SSH (Replace with your provider's action)
-      # - name: Deploy to Production
-      #   uses: appleboy/ssh-action@master
-      #   with:
-      #     host: ${{ secrets.HOST }}
-      #     username: ${{ secrets.USERNAME }}
-      #     key: ${{ secrets.SSH_KEY }}
-      #     script: |
-      #       cd /path/to/app
-      #       git pull origin main
-      #       docker-compose up -d --build
+      # For TechSolute deployment, you can add your specific provider steps here
+      # e.g., Render, Railway, or AWS.
+      - name: Deployment Status
+        run: echo "Deployment triggered successfully: ${{ github.event.inputs.reason }}"
