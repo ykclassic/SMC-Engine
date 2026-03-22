@@ -1,31 +1,32 @@
 # Nexus-SMC-SignalEngine 🚀
 
-An institutional-grade cryptocurrency signal generator built on **Smart Money Concepts (SMC)**. This engine utilizes multi-timeframe analysis to identify high-probability trade setups based on institutional order flow.
+The **Nexus-SMC-SignalEngine** is a hybrid algorithmic trading suite developed by **TechSolute**. It combines the deterministic precision of **Smart Money Concepts (SMC)** with the predictive power of **Recurrent Neural Networks (GRU)** and **Sentiment Analysis**.
 
-## 🧠 Core Methodology
-The system follows a strict 5-step algorithmic pipeline:
-1. **Market Structure:** Identifies HH/HL/LL/LH and confirms trend via **Body-Close BOS**.
-2. **Liquidity:** Locates Equal Highs/Lows and detects **Stop Hunts (Sweeps)**.
-3. **Imbalance:** Detects **Fair Value Gaps (FVG)** to identify market inefficiency.
-4. **Supply/Demand:** Pins specific **Order Blocks (OB)** that caused structural breaks.
-5. **Top-Down Confluence:** Validates 15m entries only when they align with 4H Macro Bias.
+## 🏗 System Architecture
 
-## 📁 Project Structure
-The project follows a modular, scalable architecture:
-- `core/`: Deterministic SMC logic (Structure, Liquidity, Zones).
-- `data/`: Exchange-agnostic API connectors (CCXT).
-- `alerts/`: Discord integration and signal formatting.
-- `models/`: (Expansion Ready) AI/ML filters (LSTM/Sentiment).
-- `config/`: Centralized YAML settings.
+### 1. The Deterministic Layer (`core/`)
+Uses high-frequency price action to identify:
+* **Market Structure:** BOS (Break of Structure) and ChoCh (Change of Character).
+* **Liquidity:** EQH/EQL sweeps and stop-hunts.
+* **Supply & Demand:** Unmitigated Order Blocks (OB) and Fair Value Gaps (FVG).
 
-## 🚀 Getting Started
+### 2. The Probabilistic Layer (`models/`)
+Acts as a "Confirmation Gate" for every signal:
+* **GRU Predictor:** Analyzes the last 50 candles to predict the probability of success.
+* **FinBERT Sentiment:** Scans financial news to ensure the signal aligns with market mood.
 
-### Prerequisites
-- Python 3.9+
-- Docker (Optional for containerized deployment)
+### 3. The Delivery Layer (`alerts/`)
+Formatted Discord embeds featuring dynamic Entry, SL, TP, and Risk/Reward calculations.
 
-### Installation
-1. Clone the repository.
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
+## 🚀 Deployment & CI/CD
+* **Continuous Integration:** GitHub Actions check code quality and run unit tests on every push.
+* **Continuous Training:** The AI model is automatically retrained every Saturday on fresh market data.
+* **Dockerized:** Deployable to any cloud environment (Render, Railway, VPS).
+
+## 🛠 Setup
+1. Define your API keys in `.env`.
+2. Customize `config/settings.yaml`.
+3. Run `python main.py` for live monitoring or `scripts/train_models.py` to initialize the AI.
+
+---
+*Developed for the TechSolute Nexus Intelligence Suite.*
