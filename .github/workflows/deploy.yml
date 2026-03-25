@@ -7,51 +7,57 @@ on:
   workflow_dispatch:
     inputs:
       run_smoke_test:
-        description: 'Run API Smoke Test before deploy?'
+        description: 'Execute API Smoke Test before full deploy?'
         required: true
         type: boolean
         default: true
+      deploy_reason:
+        description: 'Reason for manual deployment'
+        required: false
+        default: 'Manual maintenance'
 
 jobs:
   deploy:
     name: Production Deployment
     runs-on: ubuntu-latest
     
-    # Ensures only one deployment runs at a time
+    # Prevents concurrent deployments from overlapping
     concurrency:
-      group: production-deploy
+      group: production-deployment
       cancel-in-progress: true
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Setup Python 3.9
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
           cache: 'pip'
 
-      - name: Install Dependencies
+      - name: Install Project Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Execute API Smoke Test
-        # Runs if manually triggered with 'true' OR if triggered by a push
-        if: ${{ github.event.inputs.run_smoke_test != 'false' }}
+        # This runs on pushes OR if the manual input is true
+        if: github.event_name == 'push' || github.event.inputs.run_smoke_test == 'true'
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
+          EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python scripts/smoke_test.py
 
       - name: Build Docker Container
         run: |
           docker build -t nexus-smc-engine:latest .
-          echo "Build successful for TechSolute production."
+          echo "Build successful for TechSolute architecture."
 
       - name: Finalize Deployment
         run: |
-          echo "Nexus Engine is now live."
-          # Insert your specific VPS/Cloud deploy command here
+          echo "Nexus-SMC-SignalEngine deployment finalized."
+          echo "Reason: ${{ github.event.inputs.deploy_reason || 'Automatic Push' }}"
+          # Add your specific cloud provider command here (e.g., render-cli, railway, or ssh)
