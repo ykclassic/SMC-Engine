@@ -2,45 +2,127 @@ name: AI - Model Retraining Pipeline
 
 on:
   schedule:
-    - cron: '0 0 * * 6' # Every Saturday at Midnight
-  workflow_dispatch: # Allows manual trigger for urgent updates
+    - cron: '0 0 * * 6'  # Every Saturday at Midnight UTC
+  workflow_dispatch:
 
 jobs:
   retrain-model:
+    name: Train & Validate AI Model
     runs-on: ubuntu-latest
+
+    concurrency:
+      group: ai-retraining
+      cancel-in-progress: true
+
     steps:
+      # -----------------------------
+      # 1. Checkout Repository
+      # -----------------------------
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # -----------------------------
+      # 2. Setup Python
+      # -----------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
+          cache: 'pip'
 
+      # -----------------------------
+      # 3. Install Dependencies
+      # -----------------------------
       - name: Install Dependencies
         run: |
-          pip install torch pandas numpy scikit-learn
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Training Script
+      # -----------------------------
+      # 4. Verify Environment Variables
+      # -----------------------------
+      - name: Validate Required Secrets
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
-        run: python scripts/train_models.py
-
-      - name: Evaluate Model Performance
+          EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          # Logic to check if the new model's accuracy is > 65%
-          # If it fails, the workflow stops here and sends an alert
-          python scripts/validate_model.py 
+          missing=0
 
-      - name: Commit and Push New Weights
+          if [ -z "$EXCHANGE_API_KEY" ]; then echo "Missing EXCHANGE_API_KEY"; missing=1; fi
+          if [ -z "$EXCHANGE_API_SECRET" ]; then echo "Missing EXCHANGE_API_SECRET"; missing=1; fi
+          if [ -z "$EXCHANGE_PASSPHRASE" ]; then echo "Missing EXCHANGE_PASSPHRASE"; missing=1; fi
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then echo "Missing DISCORD_WEBHOOK_URL"; missing=1; fi
+
+          if [ "$missing" -eq 1 ]; then
+            echo "❌ Required secrets are missing. Aborting."
+            exit 1
+          fi
+
+          echo "✅ All required secrets are present."
+
+      # -----------------------------
+      # 5. Run Training Script
+      # -----------------------------
+      - name: Train AI Model
+        env:
+          EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
+          EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
+          EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          PYTHONPATH: .
+        run: |
+          echo "🚀 Starting model training..."
+          python scripts/train_models.py
+
+      # -----------------------------
+      # 6. Validate Model Performance
+      # -----------------------------
+      - name: Validate Model
+        env:
+          PYTHONPATH: .
+        run: |
+          echo "📊 Running validation gate..."
+          python scripts/validate_model.py
+
+      # -----------------------------
+      # 7. Upload Model Artifact (for traceability)
+      # -----------------------------
+      - name: Upload Model Artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trained-model
+          path: models/weights/latest_gru.pth
+
+      # -----------------------------
+      # 8. Commit & Push New Model
+      # -----------------------------
+      - name: Commit and Push Model
         if: success()
         run: |
+          if [ ! -f models/weights/latest_gru.pth ]; then
+            echo "❌ Model file not found. Skipping commit."
+            exit 1
+          fi
+
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
+
           git add models/weights/latest_gru.pth
-          git commit -m "🤖 AI: Automated Weekly Model Retrain [$(date +'%Y-%m-%d')]"
+
+          # Prevent empty commit error
+          git diff --cached --quiet && echo "No changes to commit." && exit 0
+
+          git commit -m "🤖 AI: Weekly Model Retrain ($(date +'%Y-%m-%d'))"
           git push
+
+      # -----------------------------
+      # 9. Final Status
+      # -----------------------------
+      - name: Pipeline Complete
+        if: success()
+        run: echo "✅ AI retraining pipeline completed successfully."
