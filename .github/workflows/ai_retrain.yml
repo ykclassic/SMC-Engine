@@ -2,12 +2,12 @@ name: AI - Model Retraining Pipeline
 
 on:
   schedule:
-    - cron: '0 0 * * 6'  # Every Saturday at Midnight UTC
+    - cron: '0 0 * * 6'  # Every Saturday at 00:00 UTC
   workflow_dispatch:
 
 jobs:
   retrain-model:
-    name: Train & Validate AI Model
+    name: Train, Validate, and Version Model
     runs-on: ubuntu-latest
 
     concurrency:
@@ -26,7 +26,7 @@ jobs:
       # -----------------------------
       # 2. Setup Python
       # -----------------------------
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
@@ -41,9 +41,9 @@ jobs:
           pip install -r requirements.txt
 
       # -----------------------------
-      # 4. Verify Environment Variables
+      # 4. Validate Required Secrets
       # -----------------------------
-      - name: Validate Required Secrets
+      - name: Validate Secrets
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
@@ -58,38 +58,38 @@ jobs:
           if [ -z "$DISCORD_WEBHOOK_URL" ]; then echo "Missing DISCORD_WEBHOOK_URL"; missing=1; fi
 
           if [ "$missing" -eq 1 ]; then
-            echo "❌ Required secrets are missing. Aborting."
+            echo "❌ Missing required secrets. Aborting pipeline."
             exit 1
           fi
 
           echo "✅ All required secrets are present."
 
       # -----------------------------
-      # 5. Run Training Script
+      # 5. Train Model
       # -----------------------------
-      - name: Train AI Model
+      - name: Train Model
         env:
+          PYTHONPATH: .
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          PYTHONPATH: .
         run: |
-          echo "🚀 Starting model training..."
+          echo "🚀 Training model..."
           python scripts/train_models.py
 
       # -----------------------------
-      # 6. Validate Model Performance
+      # 6. Validate Model
       # -----------------------------
       - name: Validate Model
         env:
           PYTHONPATH: .
         run: |
-          echo "📊 Running validation gate..."
+          echo "📊 Validating model..."
           python scripts/validate_model.py
 
       # -----------------------------
-      # 7. Upload Model Artifact (for traceability)
+      # 7. Upload Artifact (always useful)
       # -----------------------------
       - name: Upload Model Artifact
         if: success()
@@ -99,34 +99,34 @@ jobs:
           path: models/weights/latest_gru.pth
 
       # -----------------------------
-      # 8. Commit & Push New Model
+      # 8. Commit & Push Model (with rebase fix)
       # -----------------------------
-     - name: Commit and Push Model
-  if: success()
-  run: |
-    if [ ! -f models/weights/latest_gru.pth ]; then
-      echo "❌ Model file not found. Skipping commit."
-      exit 1
-    fi
+      - name: Commit and Push Model
+        if: success()
+        run: |
+          if [ ! -f models/weights/latest_gru.pth ]; then
+            echo "❌ Model file not found. Skipping commit."
+            exit 1
+          fi
 
-    git config --local user.email "action@github.com"
-    git config --local user.name "GitHub Action"
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
 
-    git add models/weights/latest_gru.pth
+          git add models/weights/latest_gru.pth
 
-    # Prevent empty commit
-    git diff --cached --quiet && echo "No changes to commit." && exit 0
+          # Prevent empty commit
+          git diff --cached --quiet && echo "No changes to commit." && exit 0
 
-    git commit -m "🤖 AI: Weekly Model Retrain ($(date +'%Y-%m-%d'))"
+          git commit -m "🤖 AI: Weekly Model Retrain ($(date +'%Y-%m-%d'))"
 
-    # --- CRITICAL FIX: Sync with remote before pushing ---
-    git pull origin main --rebase
+          # --- CRITICAL FIX: avoid push rejection ---
+          git pull origin main --rebase
 
-    git push origin main
-    
+          git push origin main
+
       # -----------------------------
-      # 9. Final Status
+      # 9. Completion Log
       # -----------------------------
-      - name: Pipeline Complete
+      - name: Done
         if: success()
         run: echo "✅ AI retraining pipeline completed successfully."
