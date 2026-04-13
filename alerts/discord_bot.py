@@ -1,30 +1,29 @@
 import requests
-import datetime
+import logging
 
 class DiscordNotifier:
     def __init__(self, config):
-        # Ensure we pull from the correct Env Var naming
-        self.webhook_url = config.get('discord_webhook_url') 
+        self.webhook_url = config.get('discord_webhook_url')
         self.logger = logging.getLogger("Nexus-Discord")
 
-    def send_heartbeat(self, symbol, macro_bias, ai_status):
-        """Sends a periodic status update to Discord."""
+    def send_signal(self, embed):
+        """Sends a trading signal to Discord."""
         if not self.webhook_url:
-            self.logger.error("No Webhook URL found. Heartbeat aborted.")
+            self.logger.error("No Webhook URL found. Signal not sent.")
             return
 
         payload = {
-            "username": "Nexus Guardian",
-            "embeds": [{
-                "title": "💓 Nexus System Heartbeat",
-                "description": f"Monitoring **{symbol}** with institutional precision.",
-                "color": 0x5865F2, # Discord Blue
-                "fields": [
-                    {"name": "📈 Macro Trend", "value": f"`{macro_bias}`", "inline": True},
-                    {"name": "🤖 AI Engine", "value": f"`{ai_status}`", "inline": True},
-                    {"name": "🕒 Last Check", "value": datetime.datetime.now().strftime("%H:%M:%S"), "inline": True}
-                ],
-                "footer": {"text": "TechSolute | Smart Money Concept App"}
-            }]
+            "username": "Nexus Intelligence Suite",
+            "embeds": [embed]
         }
-        requests.post(self.webhook_url, json=payload)
+
+        try:
+            response = requests.post(self.webhook_url, json=payload)
+
+            if response.status_code == 204:
+                self.logger.info("✅ Signal sent to Discord successfully.")
+            else:
+                self.logger.error(f"❌ Discord error: {response.status_code} - {response.text}")
+
+        except Exception as e:
+            self.logger.error(f"❌ Failed to send signal: {e}")
