@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 
-class MarketStructure:
+class SMCEngine:
     def __init__(self, config):
         self.lookback = config['market_structure']['lookback_period']
         self.confirm_type = config['market_structure']['structure_type']
@@ -73,9 +73,5 @@ class MarketStructure:
             if last_ll and df.at[i, 'close'] < last_ll:
                 df.at[i, 'bos'] = "BEARISH_BOS"
                 last_ll = None # Reset until next LL is formed
-                
+            
         return df
-
-# Example Usage logic for main.py integration:
-# engine = MarketStructure(config)
-# df_with_structure = engine.detect_bos(engine.get_structure_points(raw_data))
