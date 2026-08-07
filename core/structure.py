@@ -75,3 +75,31 @@ class SMCEngine:
                 last_ll = None # Reset until next LL is formed
             
         return df
+
+    def process_market(self, macro_df: pd.DataFrame, current_micro: pd.DataFrame = None):
+        """
+        Processes market data through the SMC pipeline (fractals, structure points, BOS)
+        and generates a trading signal tuple: (signal, structure_state, details).
+        """
+        # Run structural analysis pipeline on macro data
+        df = self.get_structure_points(macro_df)
+        df = self.detect_bos(df)
+        
+        # Evaluate the latest row for active Break of Structure or setup
+        latest = df.iloc[-1]
+        signal = None
+        
+        bos_status = latest.get('bos', False)
+        if bos_status == "BULLISH_BOS":
+            signal = "BUY"
+        elif bos_status == "BEARISH_BOS":
+            signal = "SELL"
+            
+        structure_state = latest.get('label', "")
+        details = {
+            "last_close": latest.get('close'),
+            "bos": bos_status,
+            "micro_available": current_micro is not None
+        }
+        
+        return signal, structure_state, details
