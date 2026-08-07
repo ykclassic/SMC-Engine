@@ -81,19 +81,17 @@ class SMCEngine:
         Processes market data through the SMC pipeline (fractals, structure points, BOS)
         and generates a trading signal tuple: (signal, structure_state, details).
         """
-        # Run structural analysis pipeline on macro data
         df = self.get_structure_points(macro_df)
         df = self.detect_bos(df)
         
-        # Evaluate the latest row for active Break of Structure or setup
         latest = df.iloc[-1]
         signal = None
         
         bos_status = latest.get('bos', False)
         if bos_status == "BULLISH_BOS":
-            signal = "BUY"
+            signal = {"type": "LONG", "entry": latest.get('close'), "zone_limit": latest.get('low'), "reason": "Bullish Break of Structure confirmed"}
         elif bos_status == "BEARISH_BOS":
-            signal = "SELL"
+            signal = {"type": "SHORT", "entry": latest.get('close'), "zone_limit": latest.get('high'), "reason": "Bearish Break of Structure confirmed"}
             
         structure_state = latest.get('label', "")
         details = {
@@ -103,3 +101,6 @@ class SMCEngine:
         }
         
         return signal, structure_state, details
+
+# Backward-compatibility alias to prevent import mismatches across modules
+MarketStructure = SMCEngine
