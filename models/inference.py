@@ -1,5 +1,6 @@
 import torch
 import os
+from models.gru import SignalValidatorGRU
 
 class ModelInference:
     def __init__(self, config):
@@ -9,7 +10,8 @@ class ModelInference:
         
         if os.path.exists(self.model_path):
             self.model.load_state_dict(torch.load(self.model_path, map_location=self.device))
-            self.model.eval()
+        
+        self.model.eval()
 
     def predict_confidence(self, processed_features):
         """Returns a probability (0-1) that the current setup will succeed."""
