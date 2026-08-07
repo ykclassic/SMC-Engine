@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 
 class SignalValidatorGRU(nn.Module):
-    def __init__(self, input_dim: int = 5, hidden_dim: int = 64, num_layers: int = 1, output_dim: int = 1):
+    def __init__(self, input_dim: int = 5, hidden_dim: int = 64, num_layers: int = 2, output_dim: int = 1):
         """
-        GRU-based neural network architecture matching the pre-trained weights schema.
+        GRU-based neural network architecture matching the 2-layer pre-trained weights schema.
         """
         super(SignalValidatorGRU, self).__init__()
         
@@ -15,13 +15,13 @@ class SignalValidatorGRU(nn.Module):
             batch_first=True
         )
         
-        # Single linear layer and activation matching checkpoint keys: fc.weight, fc.bias
+        # Single linear layer matching checkpoint keys: fc.weight, fc.bias
         self.fc = nn.Linear(hidden_dim, output_dim)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass through the GRU and linear head.
+        Forward pass through the 2-layer GRU and linear head.
         """
         if x.dim() == 2:
             x = x.unsqueeze(1)
