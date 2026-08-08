@@ -43,15 +43,21 @@ class LiquidityEngine:
         df['liquidity_sweep'] = False
         
         for i in range(1, len(df)):
+            sub_df = df.iloc[:i]
+            
             # Check for Sell-side Sweep (Price dips below EQL then bounces)
-            prev_eql = df.iloc[:i][df['liquidity_pool'] == "EQL"]['low'].last_valid_index()
+            eql_matches = sub_df.loc[sub_df['liquidity_pool'] == "EQL", 'low']
+            prev_eql = eql_matches.last_valid_index() if not eql_matches.empty else None
+            
             if prev_eql:
                 level = df.at[prev_eql, 'low']
                 if df.at[i, 'low'] < level and df.at[i, 'close'] > level:
                     df.at[i, 'liquidity_sweep'] = "BULLISH_SWEEP"
 
             # Check for Buy-side Sweep (Price spikes above EQH then drops)
-            prev_eqh = df.iloc[:i][df['liquidity_pool'] == "EQH"]['high'].last_valid_index()
+            eqh_matches = sub_df.loc[sub_df['liquidity_pool'] == "EQH", 'high']
+            prev_eqh = eqh_matches.last_valid_index() if not eqh_matches.empty else None
+            
             if prev_eqh:
                 level = df.at[prev_eqh, 'high']
                 if df.at[i, 'high'] > level and df.at[i, 'close'] < level:
