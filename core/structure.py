@@ -54,7 +54,8 @@ class SMCEngine:
         Bullish BOS: Price closes above the previous Higher High.
         Bearish BOS: Price closes below the previous Lower Low.
         """
-        df['bos'] = False
+        # INITIALIZATION FIX: Use None to allow object/string insertion without Pandas dtype warnings
+        df['bos'] = None
         last_hh = None
         last_ll = None
 
@@ -87,7 +88,7 @@ class SMCEngine:
         latest = df.iloc[-1]
         signal = None
         
-        bos_status = latest.get('bos', False)
+        bos_status = latest.get('bos', None)
         if bos_status == "BULLISH_BOS":
             signal = {"type": "LONG", "entry": latest.get('close'), "zone_limit": latest.get('low'), "reason": "Bullish Break of Structure confirmed"}
         elif bos_status == "BEARISH_BOS":
