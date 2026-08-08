@@ -5,7 +5,6 @@ from core.liquidity import LiquidityEngine
 from core.zones import ZoneEngine
 from core.confluence import ConfluenceEngine
 
-
 class SMCEngine:
     def __init__(self, config):
         self.config = config
