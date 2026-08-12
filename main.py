@@ -18,16 +18,17 @@ def main():
     # -----------------------------
     # Configuration Enforcement
     # -----------------------------
-    # Enforcing correct exchange and core fiat-paired instruments
-    config.setdefault("trading", {})
-    config["trading"]["exchange"] = "xt.com"
+    # Let the config_loader handle the exchange (Bitget) natively
+    exchange_name = config.get("trading", {}).get("exchange", "bitget").capitalize()
+    
+    # Strictly targeting MT5-compliant symbol formats
     symbols_to_scan = ["BTCUSD", "ETHUSD"]
     
     exchange = ExchangeInterface(config)
     engine = SMCEngine(config)
     notifier = DiscordNotifier(config)
     
-    logger.info("Initializing Equinox Protocol... Pre-loading XT.com market structure...")
+    logger.info(f"Initializing Equinox Protocol... Pre-loading {exchange_name} market structure...")
 
     for symbol in symbols_to_scan:
         logger.info(f"Executing multi-timeframe scan for {symbol}...")
@@ -42,7 +43,7 @@ def main():
             # Validate dataset integrity across all timeframes
             datasets = [daily_raw, h4_raw, h1_raw, m15_raw]
             if any(df is None or df.empty for df in datasets):
-                logger.warning(f"Fetched incomplete dataset from XT.com for {symbol}. Skipping to next asset.")
+                logger.warning(f"Fetched incomplete dataset from {exchange_name} for {symbol}. Skipping to next asset.")
                 continue
 
             # 2. Process Market (4-Phase SMC Pipeline)
