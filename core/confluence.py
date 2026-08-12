@@ -8,7 +8,7 @@ class ConfluenceEngine:
         self.ai_engine = ModelInference(config)
         self.fe = FeatureEngineer()
 
-    def validate_signal(self, macro_df: pd.DataFrame, micro_df: pd.DataFrame):
+    def validate_signal(self, daily_df: pd.DataFrame, h4_df: pd.DataFrame, h1_df: pd.DataFrame, m15_df: pd.DataFrame):
         """
         Evaluates the SMC structures on macro/micro timeframes, formulates a 
         base signal, and validates it through the AI inference engine.
@@ -16,11 +16,13 @@ class ConfluenceEngine:
         # INITIALIZATION FIX: Ensure variable exists before conditional evaluation
         smc_signal_detected = None 
         
-        latest_micro = micro_df.iloc[-1]
-        latest_macro = macro_df.iloc[-1]
+        # Mapping the multi-timeframe inputs to the AI's expected logic
+        # 15M acts as the tactical micro entry, 4H provides the intermediate structural context
+        latest_micro = m15_df.iloc[-1]
+        latest_macro = h4_df.iloc[-1]
         
         # Read the detected sweeps from the liquidity engine
-        sweep = latest_micro.get('liquidity_sweep', False)
+        sweep = latest_micro.get('liquidity_sweep', None)
         macro_bos = latest_macro.get('bos', "No Recent BOS")
         
         # Formulate initial SMC Signal based on micro timeframe sweeps
@@ -39,7 +41,7 @@ class ConfluenceEngine:
 
         # Run AI Validation if a structural setup was found
         if smc_signal_detected:
-            features = self.fe.prepare_smc_features(micro_df)
+            features = self.fe.prepare_smc_features(m15_df)
             confidence = self.ai_engine.predict_confidence(features)
             
             if confidence >= self.min_ai_confidence:
