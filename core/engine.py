@@ -30,8 +30,9 @@ class SMCEngine:
         # Objective: Establish macro trend, market regime, and major structural boundaries.
         # -----------------------------
         daily_df = self.structure.get_structure_points(daily_data)
-        # ✅ FIX: Detect BOS to provide structural context before hunting order blocks
         daily_df = self.structure.detect_bos(daily_df)  
+        # ✅ FIX: Detect FVG required to validate Daily order blocks
+        daily_df = self.zones.detect_fvg(daily_df)
         daily_df = self.zones.find_order_blocks(daily_df) 
 
         # -----------------------------
@@ -59,10 +60,11 @@ class SMCEngine:
         # Objective: Final entry triggers, sweep detection, and refined entry models.
         # -----------------------------
         m15_df = self.structure.get_structure_points(m15_data)
-        # ✅ FIX: Detect BOS required to validate local 15M order blocks
         m15_df = self.structure.detect_bos(m15_df) 
         m15_df = self.liquidity.identify_liquidity_pools(m15_df)
         m15_df = self.liquidity.detect_sweeps(m15_df)
+        # ✅ FIX: Detect FVG required to validate local 15M order blocks
+        m15_df = self.zones.detect_fvg(m15_df)
         m15_df = self.zones.find_order_blocks(m15_df)
 
         # -----------------------------
