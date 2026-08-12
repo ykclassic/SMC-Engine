@@ -40,7 +40,9 @@ class LiquidityEngine:
         Detects a 'Liquidity Sweep' where price wicks past an EQH/EQL 
         but fails to close above/below it, reversing immediately.
         """
-        df['liquidity_sweep'] = False
+        # REQUIRED FIX: Initialized to None instead of False to set the column dtype to 'object'
+        # This prevents pandas FutureWarning and hard crashes when inserting strings later.
+        df['liquidity_sweep'] = None
         
         for i in range(1, len(df)):
             sub_df = df.iloc[:i]
