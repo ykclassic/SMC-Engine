@@ -8,15 +8,28 @@ class SMCEngine:
 
     def detect_fractals(self, df: pd.DataFrame):
         """
-        Identifies Swing Highs and Swing Lows based on a lookback window.
-        A fractal high is a peak higher than 'n' candles to its left and right.
+        Identifies Swing Highs and Swing Lows safely for live-market processing.
+        Shifts the evaluation so the live edge is not converted to NaN.
         """
-        df['is_high'] = df['high'].rolling(window=self.lookback*2+1, center=True).apply(
-            lambda x: 1 if x.iloc[self.lookback] == x.max() else 0, raw=False
-        )
-        df['is_low'] = df['low'].rolling(window=self.lookback*2+1, center=True).apply(
-            lambda x: 1 if x.iloc[self.lookback] == x.min() else 0, raw=False
-        )
+        window = self.lookback * 2 + 1
+        
+        df['is_high'] = 0
+        df['is_low'] = 0
+        
+        # Iterate over the valid windows without blinding the live edge
+        for i in range(window - 1, len(df)):
+            slice_high = df['high'].iloc[i - window + 1 : i + 1]
+            slice_low = df['low'].iloc[i - window + 1 : i + 1]
+            
+            # If the peak of the window is exactly in the middle (lookback), it is a fractal
+            if slice_high.max() == slice_high.iloc[self.lookback]:
+                target_idx = i - self.lookback
+                df.iloc[target_idx, df.columns.get_loc('is_high')] = 1
+                
+            if slice_low.min() == slice_low.iloc[self.lookback]:
+                target_idx = i - self.lookback
+                df.iloc[target_idx, df.columns.get_loc('is_low')] = 1
+                
         return df
 
     def get_structure_points(self, df: pd.DataFrame):
