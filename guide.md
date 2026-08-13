@@ -1,6 +1,4 @@
----
-
-### 4. `GUIDE.md` (Technical Documentation)
+ `GUIDE.md` (Technical Documentation)
 This document explains the "Why" behind the logic for future maintenance.
 
 ```markdown
@@ -34,3 +32,27 @@ The `SentimentAnalyzer` uses the **FinBERT** model. If the sentiment is "Highly 
 
 ## GitHub Actions Logic
 * **`ai_retrain.yml`**: Automates the evolution of the model. It ensures the weights in `models/weights/` are never older than 7 days.
+
+# Technical Implementation Guide: SMC Logic
+This document explains the "Why" behind the architecture and decision-making logic for future maintenance.
+## 1. Market Structure (core/structure.py)
+We use a **Fractal-based approach** configured via lookback_period in settings.yaml to identify swing points. A High or Low is confirmed when it forms the peak or trough within its local window. To prevent the live-market "blinding" bug (where rolling center windows turn the most recent edge into NaN), the evaluation explicitly scans valid historical slices without compromising real-time data feeds. Furthermore, structure breaks dynamically respect the structure_type parameter, allowing toggling between strict **body_close** validations and aggressive **wick** triggers.
+## 2. Order Block Validation (core/zones.py)
+The engine uses a "High Probability" filter for Order Blocks and supply/demand zones. An OB is only logged if:
+ * It is coupled with a **Fair Value Gap (FVG)** when require_fvg is enforced (though fallback configurations allow raw BOS origin blocks).
+ * It resulted in a verified **Break of Structure (BOS)**.
+ * It remains **Unmitigated** (price has not yet retested or breached the zone boundaries).
+## 3. The Confluence Logic (core/confluence.py)
+This serves as the primary multi-timeframe gatekeeper. Even if a 15-minute chart exhibits a valid liquidity sweep (liquidity.py), the engine checks the **Macro Alignment Gate**. Controlled by require_macro_alignment, the pipeline will immediately suppress and log a signal if a micro-timeframe setup contradicts the prevailing 4-hour structural bias.
+## 4. Risk Calculation
+Stop Losses are automatically calculated with safety buffers (e.g., stop_loss_buffer_pct: 0.001) placed beyond the structural limits of the identified Order Block. Take Profit targets scale automatically based on the configured **Risk/Reward ratio** (default 3.0), maintaining mathematical edge.
+# Nexus Technical Specification: Hybrid SMC-AI Integration
+## AI Validation Protocol
+The system does not execute a trade solely on technical setups. When a structural confluence signal passes technical gates, it is piped to models/inference.py:
+ 1. **Feature Vector:** The system compiles OHLCV metrics and SMC state arrays through FeatureEngineer into the required input tensor.
+ 2. **Inference:** The underlying machine learning model evaluates the context and calculates a confidence_score.
+ 3. **Threshold Gate:** If confidence_score is less than min_ai_confidence (default 0.75), the trade is rejected and logged explicitly as "AI Filtered" for telemetry tracking.
+## Sentiment Weighting
+The integrated SentimentAnalyzer processes macroeconomic data feeds. If negative sentiment thresholds cross safety parameters, counter-trend setups are systematically suppressed to protect capital against sudden market shifts.
+## GitHub Actions Logic
+ * **Automated CI/CD Pipelines**: Run scheduled verification cycles, handle data ingestion payloads via Bitget API mappings, and broadcast validated signals straight to Discord via secure webhook endpoints.
