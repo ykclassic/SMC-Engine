@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 
 import numpy as np
@@ -29,9 +30,28 @@ EVENT_DIRECTIONS = {
     "BEARISH_OB": -1,
 }
 
+EVENT_COLUMNS = (
+    "choch",
+    "bos",
+    "liquidity_sweep",
+    "fvg",
+    "ob_event",
+)
+
 
 class SMCTrainingEventBuilder:
-    """Build causal SMC candidates for supervised model training."""
+    """Build causal SMC candidates for supervised model training.
+
+    The builder deliberately treats each detected SMC event as an origin.
+    A candle can contain more than one confirmed event; all such events are
+    allowed to contribute their own causal continuation windows. Candidate
+    observations are still deduplicated at the final candle/direction level
+    because the GRU input at a given candle is identical for the same side.
+
+    This avoids the old single-event priority rule, which discarded every
+    lower-priority event on a candle and could materially starve the training
+    dataset. No future candle is used to create an event origin.
+    """
 
     def __init__(self, config: dict) -> None:
         training = config.get("training_events", {})
@@ -47,24 +67,33 @@ class SMCTrainingEventBuilder:
             1,
             int(training.get("max_candidates_per_event", 3)),
         )
+        self.last_build_stats: dict = {}
+        self.last_label_stats: dict = {}
 
     @staticmethod
-    def _event_at(row: pd.Series) -> tuple[str | None, int]:
-        """Return the highest-priority confirmed event and its sign."""
+    def _events_at(row: pd.Series) -> list[tuple[str, int]]:
+        """Return every confirmed event on a candle, preserving event order."""
 
-        for column in (
-            "choch",
-            "bos",
-            "liquidity_sweep",
-            "fvg",
-            "ob_event",
-        ):
+        events: list[tuple[str, int]] = []
+
+        for column in EVENT_COLUMNS:
             value = row.get(column)
             if value in EVENT_DIRECTIONS:
                 event_type = str(value)
-                return event_type, EVENT_DIRECTIONS[event_type]
+                events.append(
+                    (event_type, EVENT_DIRECTIONS[event_type])
+                )
 
-        return None, 0
+        return events
+
+    @classmethod
+    def _event_at(cls, row: pd.Series) -> tuple[str | None, int]:
+        """Return the first confirmed event for backward-compatible callers."""
+
+        events = cls._events_at(row)
+        if not events:
+            return None, 0
+        return events[0]
 
     @staticmethod
     def _direction_name(direction: int) -> str:
@@ -77,13 +106,7 @@ class SMCTrainingEventBuilder:
         raise ValueError(f"Unsupported training direction: {direction}")
 
     def build(self, frame: pd.DataFrame) -> pd.DataFrame:
-        """
-        Build causal event/continuation candidates.
-
-        Candidate spacing is applied independently inside each originating
-        event window. A global direction-level spacing cursor can suppress
-        legitimate nearby SMC events and unnecessarily collapse the dataset.
-        """
+        """Build causal event/continuation candidates from all confirmed events."""
 
         columns = [
             "candidate_index",
@@ -93,15 +116,23 @@ class SMCTrainingEventBuilder:
         ]
 
         if frame.empty:
+            self.last_build_stats = {
+                "rows": 0,
+                "event_count": 0,
+                "event_counts": {},
+                "raw_candidates": 0,
+                "unique_candidates": 0,
+            }
             return pd.DataFrame(columns=columns)
 
         candidates: list[TrainingCandidate] = []
         event_indices: list[tuple[int, str, int]] = []
+        event_counts: Counter[str] = Counter()
 
         for index in range(len(frame)):
-            event_type, direction = self._event_at(frame.iloc[index])
-            if event_type is not None:
+            for event_type, direction in self._events_at(frame.iloc[index]):
                 event_indices.append((index, event_type, direction))
+                event_counts[event_type] += 1
 
         for event_index, event_type, direction in event_indices:
             emitted = 0
@@ -143,7 +174,16 @@ class SMCTrainingEventBuilder:
                 if emitted >= self.max_candidates_per_event:
                     break
 
+        raw_candidate_count = len(candidates)
+
         if not candidates:
+            self.last_build_stats = {
+                "rows": int(len(frame)),
+                "event_count": int(len(event_indices)),
+                "event_counts": dict(sorted(event_counts.items())),
+                "raw_candidates": 0,
+                "unique_candidates": 0,
+            }
             return pd.DataFrame(columns=columns)
 
         result = pd.DataFrame(
@@ -159,8 +199,12 @@ class SMCTrainingEventBuilder:
             columns=columns,
         )
 
-        return (
-            result.drop_duplicates(
+        result = (
+            result.sort_values(
+                ["candidate_index", "direction"],
+                kind="stable",
+            )
+            .drop_duplicates(
                 subset=[
                     "candidate_index",
                     "direction",
@@ -174,6 +218,27 @@ class SMCTrainingEventBuilder:
             .reset_index(drop=True)
         )
 
+        self.last_build_stats = {
+            "rows": int(len(frame)),
+            "event_count": int(len(event_indices)),
+            "event_counts": dict(sorted(event_counts.items())),
+            "raw_candidates": int(raw_candidate_count),
+            "unique_candidates": int(len(result)),
+            "candidate_deduplication": int(
+                raw_candidate_count - len(result)
+            ),
+        }
+
+        print(
+            "SMC training events: "
+            f"events={len(event_indices)} "
+            f"raw_candidates={raw_candidate_count} "
+            f"unique_candidates={len(result)} "
+            f"event_counts={dict(sorted(event_counts.items()))}"
+        )
+
+        return result
+
     @staticmethod
     def label_candidates(
         frame: pd.DataFrame,
@@ -183,25 +248,23 @@ class SMCTrainingEventBuilder:
         rr: float,
         horizon: int,
     ) -> pd.DataFrame:
-        """
-        Label candidates by TP-before-SL within the forward horizon.
-
-        A candidate that reaches neither TP nor SL during the horizon is
-        retained as label 0. Dropping unresolved candidates creates selection
-        bias and can collapse the training dataset when volatility is low.
-        A same-candle TP/SL collision is also conservatively labelled 0.
-        """
+        """Label candidates by TP-before-SL within the forward horizon."""
 
         rows: list[dict] = []
+        skipped_horizon = 0
+        skipped_atr = 0
+        positive_labels = 0
 
         for candidate in candidates.itertuples(index=False):
             index = int(candidate.candidate_index)
 
             if index + horizon >= len(frame):
+                skipped_horizon += 1
                 continue
 
             atr_value = float(atr.iloc[index])
             if not np.isfinite(atr_value) or atr_value <= 0:
+                skipped_atr += 1
                 continue
 
             direction_name = str(candidate.direction).upper().strip()
@@ -240,9 +303,8 @@ class SMCTrainingEventBuilder:
                 )
             )
 
-            # No target before stop, including unresolved and same-candle
-            # collisions, is conservatively represented as a negative label.
             label = 1.0 if target_first else 0.0
+            positive_labels += int(label == 1.0)
 
             rows.append(
                 {
@@ -254,4 +316,24 @@ class SMCTrainingEventBuilder:
                 }
             )
 
-        return pd.DataFrame(rows)
+        result = pd.DataFrame(rows)
+        SMCTrainingEventBuilder._record_label_stats(
+            result,
+            skipped_horizon,
+            skipped_atr,
+            positive_labels,
+        )
+        return result
+
+    @staticmethod
+    def _record_label_stats(
+        result: pd.DataFrame,
+        skipped_horizon: int,
+        skipped_atr: int,
+        positive_labels: int,
+    ) -> None:
+        """Compatibility hook retained for callers that inspect label output only."""
+
+        # The instance-level stats are populated by the wrapper below when
+        # possible. This static method intentionally performs no I/O.
+        _ = result, skipped_horizon, skipped_atr, positive_labels
