@@ -154,16 +154,28 @@ def test_training_builder_opt_in_recovery_expands_sparse_dataset():
     assert len(candidates) >= 10
 
 
-def test_adaptive_recovery_does_not_stop_at_298_when_300_are_required():
+def test_exact_298_label_shortfall_still_requires_recovery():
     builder = SMCTrainingEventBuilder(
         {
             "training_events": {
                 "minimum_labeled_candidates_per_symbol": 300,
-                "recovery_continuation_window": 512,
-                "recovery_max_candidates_per_event": 512,
-                "recovery_growth_factor": 2,
-                "recovery_max_window": 2048,
-                "recovery_max_candidates_per_event_limit": 2048,
+                "recovery_candidate_buffer": 64,
+            },
+            "model": {"label_horizon": 20},
+        }
+    )
+
+    assert builder.minimum_labeled_candidates == 300
+    assert builder.recovery_needed(298) is True
+    assert builder.recovery_needed(299) is True
+    assert builder.recovery_needed(300) is False
+
+
+def test_recovery_target_excludes_sequence_length_from_raw_candidate_target():
+    builder = SMCTrainingEventBuilder(
+        {
+            "training_events": {
+                "minimum_labeled_candidates_per_symbol": 300,
                 "recovery_candidate_buffer": 64,
             },
             "model": {
@@ -173,22 +185,41 @@ def test_adaptive_recovery_does_not_stop_at_298_when_300_are_required():
         }
     )
 
-    # Run #60/#latest failures produced 298 usable labels against a hard
-    # requirement of 300. The builder must therefore maintain a safety buffer
-    # rather than treating 300 raw candidates as sufficient.
-    assert builder.minimum_labeled_candidates == 300
-    assert builder._recovery_target_candidates() == 415
+    # 300 required labels + 20 forward-label horizon + 64 safety buffer.
+    # Sequence length must not inflate the raw candidate target.
+    assert builder._recovery_target_candidates() == 384
 
-    frame = add_event_columns(make_frame(700))
+
+def test_recovery_expands_beyond_previous_2048_window_ceiling():
+    frame = add_event_columns(make_frame(5000))
     frame.loc[50, "bos"] = "BULLISH_BOS"
     frame.loc[300, "fvg"] = "BULLISH_FVG"
-    frame.loc[500, "liquidity_sweep"] = "BULLISH_SWEEP"
+    frame.loc[1000, "liquidity_sweep"] = "BULLISH_SWEEP"
+
+    builder = SMCTrainingEventBuilder(
+        {
+            "training_events": {
+                "minimum_labeled_candidates_per_symbol": 300,
+                "recovery_continuation_window": 512,
+                "recovery_growth_factor": 2,
+                "recovery_max_window": 8192,
+                "recovery_max_candidates_per_event": 512,
+                "recovery_max_candidates_per_event_limit": 8192,
+                "recovery_candidate_buffer": 64,
+            },
+            "model": {
+                "sequence_length": 32,
+                "label_horizon": 20,
+            },
+        }
+    )
 
     candidates = builder.build(frame)
 
     assert builder.last_build_stats["recovery_mode"] is True
     assert builder.last_build_stats["recovery_iterations"] >= 1
-    assert len(candidates) >= 415
+    assert builder.last_build_stats["recovery_window"] >= 4096
+    assert len(candidates) >= 384
 
 
 def test_adaptive_recovery_growth_is_bounded_by_frame():
@@ -200,9 +231,9 @@ def test_adaptive_recovery_growth_is_bounded_by_frame():
             "training_events": {
                 "minimum_labeled_candidates_per_symbol": 300,
                 "recovery_continuation_window": 512,
-                "recovery_max_window": 512,
+                "recovery_max_window": 8192,
                 "recovery_max_candidates_per_event": 512,
-                "recovery_max_candidates_per_event_limit": 512,
+                "recovery_max_candidates_per_event_limit": 8192,
             },
             "model": {"sequence_length": 32, "label_horizon": 20},
         }
@@ -212,6 +243,7 @@ def test_adaptive_recovery_growth_is_bounded_by_frame():
     assert not candidates.empty
     assert builder.last_build_stats["recovery_window"] <= len(frame) - 1
     assert builder.last_build_stats["recovery_iterations"] >= 1
+    assert builder.last_build_stats["recovery_capacity_limited"] is True
 
 
 def test_training_builder_labels_use_canonical_direction_values():
