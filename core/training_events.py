@@ -54,20 +54,16 @@ class SMCTrainingEventBuilder:
 
     Production recovery is intentionally broader than normal candidate
     generation. Sparse SMC events are a data-coverage problem, not a reason to
-    lower the downstream quality gate. Recovery therefore uses real candles,
-    keeps the direction/event provenance, removes duplicate candle/direction
-    observations, and expands the causal continuation window and per-event
-    candidate budget until the downstream sequence/label losses are covered.
+    lower the downstream quality gate. Recovery expands the causal window
+    progressively and stops once a configurable candidate coverage buffer is
+    reached or the available frame is exhausted.
     """
 
     def __init__(self, config: dict) -> None:
         training = config.get("training_events", {})
         model = config.get("model", {})
 
-        self.window = max(
-            0,
-            int(training.get("continuation_window", 8)),
-        )
+        self.window = max(0, int(training.get("continuation_window", 8)))
         self.min_spacing = max(
             1,
             int(training.get("minimum_candidate_spacing", 3)),
@@ -99,25 +95,34 @@ class SMCTrainingEventBuilder:
             int(model.get("sequence_length", 32)),
         )
 
-        # These are deliberately configurable so production data coverage can
-        # be increased without changing the normal candidate contract.
         self.recovery_window = max(
             self.window,
-            int(
-                training.get(
-                    "recovery_continuation_window",
-                    512,
-                )
-            ),
+            int(training.get("recovery_continuation_window", 512)),
         )
         self.recovery_max_candidates_per_event = max(
             self.max_candidates_per_event,
+            int(training.get("recovery_max_candidates_per_event", 512)),
+        )
+        self.recovery_growth_factor = max(
+            2,
+            int(training.get("recovery_growth_factor", 2)),
+        )
+        self.recovery_max_window = max(
+            self.recovery_window,
+            int(training.get("recovery_max_window", 4096)),
+        )
+        self.recovery_max_candidates_per_event_limit = max(
+            self.recovery_max_candidates_per_event,
             int(
                 training.get(
-                    "recovery_max_candidates_per_event",
-                    512,
+                    "recovery_max_candidates_per_event_limit",
+                    4096,
                 )
             ),
+        )
+        self.recovery_candidate_buffer = max(
+            0,
+            int(training.get("recovery_candidate_buffer", 64)),
         )
 
         self.last_build_stats: dict = {}
@@ -133,9 +138,7 @@ class SMCTrainingEventBuilder:
             value = row.get(column)
             if value in EVENT_DIRECTIONS:
                 event_type = str(value)
-                events.append(
-                    (event_type, EVENT_DIRECTIONS[event_type])
-                )
+                events.append((event_type, EVENT_DIRECTIONS[event_type]))
 
         return events
 
@@ -193,10 +196,7 @@ class SMCTrainingEventBuilder:
                 kind="stable",
             )
             .drop_duplicates(
-                subset=[
-                    "candidate_index",
-                    "direction",
-                ],
+                subset=["candidate_index", "direction"],
                 keep="first",
             )
             .sort_values(
@@ -248,6 +248,41 @@ class SMCTrainingEventBuilder:
 
         return candidates
 
+    def _recovery_target_candidates(self) -> int:
+        """Return a conservative target that accounts for known downstream losses."""
+
+        downstream_loss = self.label_horizon + self.sequence_length - 1
+        return (
+            self.minimum_labeled_candidates
+            + downstream_loss
+            + self.recovery_candidate_buffer
+        )
+
+    def _next_recovery_limits(
+        self,
+        window: int,
+        max_candidates_per_event: int,
+        frame_length: int,
+    ) -> tuple[int, int]:
+        """Grow recovery limits without exceeding the available candle frame."""
+
+        next_window = min(
+            self.recovery_max_window,
+            max(
+                window + 1,
+                window * self.recovery_growth_factor,
+            ),
+            max(0, frame_length - 1),
+        )
+        next_max = min(
+            self.recovery_max_candidates_per_event_limit,
+            max(
+                max_candidates_per_event + 1,
+                max_candidates_per_event * self.recovery_growth_factor,
+            ),
+        )
+        return next_window, next_max
+
     def build(self, frame: pd.DataFrame) -> pd.DataFrame:
         """Build causal event/continuation candidates from all confirmed events."""
 
@@ -272,6 +307,7 @@ class SMCTrainingEventBuilder:
                 "recovery_window": self.window,
                 "recovery_spacing": self.min_spacing,
                 "recovery_max_candidates_per_event": self.max_candidates_per_event,
+                "recovery_iterations": 0,
             }
             return pd.DataFrame(columns=columns)
 
@@ -297,16 +333,12 @@ class SMCTrainingEventBuilder:
                 "recovery_window": self.window,
                 "recovery_spacing": self.min_spacing,
                 "recovery_max_candidates_per_event": self.max_candidates_per_event,
+                "recovery_iterations": 0,
             }
             return pd.DataFrame(columns=columns)
 
-        # Candidates lost by sequence warm-up and forward-label horizon cannot
-        # become usable labels. Include both losses in the recovery target.
         target_candidates = (
-            self.minimum_labeled_candidates
-            + self.label_horizon
-            + self.sequence_length
-            - 1
+            self._recovery_target_candidates()
             if self.recovery_enabled
             else 0
         )
@@ -323,21 +355,45 @@ class SMCTrainingEventBuilder:
         recovery_window = self.window
         recovery_spacing = self.min_spacing
         recovery_max = self.max_candidates_per_event
+        recovery_iterations = 0
 
         if self.recovery_enabled and len(result) < target_candidates:
             recovery_mode = True
             recovery_spacing = 1
-            recovery_window = self.recovery_window
-            recovery_max = self.recovery_max_candidates_per_event
-
-            candidates = self._emit_candidates(
-                frame,
-                event_indices,
-                recovery_window,
-                recovery_spacing,
-                recovery_max,
+            recovery_window = max(self.window, self.recovery_window)
+            recovery_max = max(
+                self.max_candidates_per_event,
+                self.recovery_max_candidates_per_event,
             )
-            result = self._unique_candidates(candidates)
+
+            while len(result) < target_candidates:
+                recovery_iterations += 1
+                candidates = self._emit_candidates(
+                    frame,
+                    event_indices,
+                    recovery_window,
+                    recovery_spacing,
+                    recovery_max,
+                )
+                result = self._unique_candidates(candidates)
+
+                if len(result) >= target_candidates:
+                    break
+
+                next_window, next_max = self._next_recovery_limits(
+                    recovery_window,
+                    recovery_max,
+                    len(frame),
+                )
+
+                if (
+                    next_window == recovery_window
+                    and next_max == recovery_max
+                ):
+                    break
+
+                recovery_window = next_window
+                recovery_max = next_max
 
         raw_candidate_count = len(candidates)
 
@@ -347,15 +403,14 @@ class SMCTrainingEventBuilder:
             "event_counts": dict(sorted(event_counts.items())),
             "raw_candidates": int(raw_candidate_count),
             "unique_candidates": int(len(result)),
-            "candidate_deduplication": int(
-                raw_candidate_count - len(result)
-            ),
+            "candidate_deduplication": int(raw_candidate_count - len(result)),
             "target_candidates": int(target_candidates),
             "recovery_mode": recovery_mode,
             "recovery_enabled": self.recovery_enabled,
             "recovery_window": int(recovery_window),
             "recovery_spacing": int(recovery_spacing),
             "recovery_max_candidates_per_event": int(recovery_max),
+            "recovery_iterations": int(recovery_iterations),
         }
 
         print(
@@ -365,6 +420,7 @@ class SMCTrainingEventBuilder:
             f"unique_candidates={len(result)} "
             f"target_candidates={target_candidates} "
             f"recovery_mode={recovery_mode} "
+            f"recovery_iterations={recovery_iterations} "
             f"event_counts={dict(sorted(event_counts.items()))}"
         )
 
