@@ -1,120 +1,80 @@
+from __future__ import annotations
+
 import pandas as pd
-import numpy as np
 
-class SMCEngine:
-    def __init__(self, config):
-        self.lookback = config['market_structure']['lookback_period']
-        self.confirm_type = config['market_structure']['structure_type']
 
-    def detect_fractals(self, df: pd.DataFrame):
-        """
-        Identifies Swing Highs and Swing Lows safely for live-market processing.
-        Shifts the evaluation so the live edge is not converted to NaN.
-        """
+class MarketStructureDetector:
+    """Deterministic, closed-candle market-structure detector."""
+
+    def __init__(self, config: dict) -> None:
+        self.lookback = int(config["market_structure"]["lookback_period"])
+
+    def detect_fractals(self, df: pd.DataFrame) -> pd.DataFrame:
+        frame = df.copy()
+        frame["is_high"] = 0
+        frame["is_low"] = 0
         window = self.lookback * 2 + 1
-        
-        df['is_high'] = 0
-        df['is_low'] = 0
-        
-        # Iterate over the valid windows without blinding the live edge
-        for i in range(window - 1, len(df)):
-            slice_high = df['high'].iloc[i - window + 1 : i + 1]
-            slice_low = df['low'].iloc[i - window + 1 : i + 1]
-            
-            # If the peak of the window is exactly in the middle (lookback), it is a fractal
-            if slice_high.max() == slice_high.iloc[self.lookback]:
-                target_idx = i - self.lookback
-                df.iloc[target_idx, df.columns.get_loc('is_high')] = 1
-                
-            if slice_low.min() == slice_low.iloc[self.lookback]:
-                target_idx = i - self.lookback
-                df.iloc[target_idx, df.columns.get_loc('is_low')] = 1
-                
-        return df
+        if len(frame) < window:
+            return frame
 
-    def get_structure_points(self, df: pd.DataFrame):
-        """
-        Labels points as HH, HL, LH, LL by comparing current fractal to previous.
-        """
-        df = self.detect_fractals(df)
-        highs = df[df['is_high'] == 1]['high']
-        lows = df[df['is_low'] == 1]['low']
-        
-        # Logic to determine HH/LH
-        df['label'] = ""
+        for i in range(self.lookback, len(frame) - self.lookback):
+            high_window = frame["high"].iloc[i - self.lookback : i + self.lookback + 1]
+            low_window = frame["low"].iloc[i - self.lookback : i + self.lookback + 1]
+            if frame["high"].iloc[i] == high_window.max() and (high_window == frame["high"].iloc[i]).sum() == 1:
+                frame.at[frame.index[i], "is_high"] = 1
+            if frame["low"].iloc[i] == low_window.min() and (low_window == frame["low"].iloc[i]).sum() == 1:
+                frame.at[frame.index[i], "is_low"] = 1
+        return frame
+
+    def get_structure_points(self, df: pd.DataFrame) -> pd.DataFrame:
+        frame = self.detect_fractals(df)
+        frame["label"] = None
         last_high = None
-        for idx, val in highs.items():
-            if last_high is None:
-                last_high = val
-                continue
-            df.at[idx, 'label'] = "HH" if val > last_high else "LH"
-            last_high = val
-            
-        # Logic to determine HL/LL
         last_low = None
-        for idx, val in lows.items():
-            if last_low is None:
-                last_low = val
-                continue
-            df.at[idx, 'label'] = "HL" if val > last_low else "LL"
-            last_low = val
-            
-        return df
+        for idx, row in frame.iterrows():
+            if row["is_high"] == 1:
+                frame.at[idx, "label"] = "HH" if last_high is not None and row["high"] > last_high else "LH"
+                last_high = float(row["high"])
+            elif row["is_low"] == 1:
+                frame.at[idx, "label"] = "HL" if last_low is not None and row["low"] > last_low else "LL"
+                last_low = float(row["low"])
+        return frame
 
-    def detect_bos(self, df: pd.DataFrame):
-        """
-        Detects a Break of Structure (BOS).
-        Bullish BOS: Price closes above the previous Higher High.
-        Bearish BOS: Price closes below the previous Lower Low.
-        """
-        # INITIALIZATION FIX: Use None to allow object/string insertion without Pandas dtype warnings
-        df['bos'] = None
-        last_hh = None
-        last_ll = None
+    def detect_bos(self, df: pd.DataFrame) -> pd.DataFrame:
+        frame = df.copy()
+        frame["bos"] = None
+        frame["choch"] = None
+        protected_high = None
+        protected_low = None
+        trend = None
 
-        for i in range(1, len(df)):
-            # Update targets when a fractal is confirmed
-            if df.at[i, 'label'] == "HH":
-                last_hh = df.at[i, 'high']
-            if df.at[i, 'label'] == "LL":
-                last_ll = df.at[i, 'low']
+        for idx, row in frame.iterrows():
+            label = row.get("label")
+            if label in ("HH", "LH"):
+                protected_high = float(row["high"])
+            elif label in ("HL", "LL"):
+                protected_low = float(row["low"])
 
-            # Check for Break
-            if last_hh and df.at[i, 'close'] > last_hh:
-                df.at[i, 'bos'] = "BULLISH_BOS"
-                last_hh = None # Reset until next HH is formed
-            
-            if last_ll and df.at[i, 'close'] < last_ll:
-                df.at[i, 'bos'] = "BEARISH_BOS"
-                last_ll = None # Reset until next LL is formed
-            
-        return df
+            close = float(row["close"])
+            if protected_high is not None and close > protected_high:
+                frame.at[idx, "bos"] = "BULLISH_BOS"
+                if trend == "BEARISH":
+                    frame.at[idx, "choch"] = "BULLISH_CHOCH"
+                trend = "BULLISH"
+                protected_high = None
+            elif protected_low is not None and close < protected_low:
+                frame.at[idx, "bos"] = "BEARISH_BOS"
+                if trend == "BULLISH":
+                    frame.at[idx, "choch"] = "BEARISH_CHOCH"
+                trend = "BEARISH"
+                protected_low = None
 
-    def process_market(self, macro_df: pd.DataFrame, current_micro: pd.DataFrame = None):
-        """
-        Processes market data through the SMC pipeline (fractals, structure points, BOS)
-        and generates a trading signal tuple: (signal, structure_state, details).
-        """
-        df = self.get_structure_points(macro_df)
-        df = self.detect_bos(df)
-        
-        latest = df.iloc[-1]
-        signal = None
-        
-        bos_status = latest.get('bos', None)
-        if bos_status == "BULLISH_BOS":
-            signal = {"type": "LONG", "entry": latest.get('close'), "zone_limit": latest.get('low'), "reason": "Bullish Break of Structure confirmed"}
-        elif bos_status == "BEARISH_BOS":
-            signal = {"type": "SHORT", "entry": latest.get('close'), "zone_limit": latest.get('high'), "reason": "Bearish Break of Structure confirmed"}
-            
-        structure_state = latest.get('label', "")
-        details = {
-            "last_close": latest.get('close'),
-            "bos": bos_status,
-            "micro_available": current_micro is not None
-        }
-        
-        return signal, structure_state, details
+        frame["structure_bias"] = trend
+        return frame
 
-# Backward-compatibility alias to prevent import mismatches across modules
-MarketStructure = SMCEngine
+    def analyze(self, df: pd.DataFrame) -> pd.DataFrame:
+        return self.detect_bos(self.get_structure_points(df))
+
+
+# Backward-compatible name used by existing modules.
+MarketStructure = MarketStructureDetector

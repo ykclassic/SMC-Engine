@@ -1,51 +1,52 @@
-import yaml
-import os
+from __future__ import annotations
+
 import logging
+import os
+from pathlib import Path
+
+import yaml
 from dotenv import load_dotenv
 
-def load_all_configs():
-    """
-    Loads YAML settings and Environment variables.
-    Bridges GitHub Secrets / .env into the application's config dictionary.
-    """
-    # 1. Load local .env (useful for local development)
-    load_dotenv() 
-    
-    logger = logging.getLogger("Nexus-ConfigLoader")
-    
-    # 2. Load Static YAML Settings
-    config_path = os.path.join('config', 'settings.yaml')
-    try:
-        with open(config_path, 'r') as file:
-            config = yaml.safe_load(file)
-            if config is None:
-                config = {}
-    except FileNotFoundError:
-        logger.error(f"❌ config/settings.yaml not found at {config_path}")
-        raise
 
-    # 3. Inject Sensitive Keys from Environment (GitHub Secrets or .env)
-    # We map these to the keys expected by the ExchangeInterface and DiscordBot
-    config['api_key'] = os.getenv('EXCHANGE_API_KEY')
-    config['api_secret'] = os.getenv('EXCHANGE_API_SECRET')
-    config['passphrase'] = os.getenv('EXCHANGE_PASSPHRASE') # Required for Bitget
-    config['discord_webhook_url'] = os.getenv('DISCORD_WEBHOOK_URL')
+REQUIRED_SECRETS = {
+    "EXCHANGE_API_KEY": "api_key",
+    "EXCHANGE_API_SECRET": "api_secret",
+    "EXCHANGE_PASSPHRASE": "passphrase",
+    "DISCORD_WEBHOOK_URL": "discord_webhook_url",
+}
 
-    # 4. Mandatory Secret Validation
-    required_secrets = {
-        'EXCHANGE_API_KEY': config['api_key'],
-        'EXCHANGE_API_SECRET': config['api_secret'],
-        'EXCHANGE_PASSPHRASE': config['passphrase'],
-        'DISCORD_WEBHOOK_URL': config['discord_webhook_url']
-    }
 
-    missing = [k for k, v in required_secrets.items() if not v]
-    
-    if missing:
-        logger.error(f"❌ CRITICAL: Missing required environment variables: {', '.join(missing)}")
-        # We raise an error to stop the app from running in an invalid state
-        raise EnvironmentError(f"Missing environment variables: {missing}")
-    
-    logger.info("✅ Configuration and Secrets loaded and validated successfully.")
-    
+def load_all_configs(require_secrets: bool = True) -> dict:
+    """Load YAML configuration and optionally validate runtime secrets."""
+    load_dotenv()
+    logger = logging.getLogger("SMC-Config")
+    config_path = Path(__file__).resolve().parents[1] / "config" / "settings.yaml"
+    with config_path.open("r", encoding="utf-8") as file:
+        config = yaml.safe_load(file) or {}
+
+    config.setdefault("trading", {})
+    config.setdefault("market_data", {})
+    config["market_data"].setdefault("timeframes", {})
+    config["market_data"].setdefault("limits", {})
+    config.setdefault("model", {})
+    config.setdefault("risk_management", {})
+    config.setdefault("notifications", {})
+    config.setdefault("journal", {})
+
+    for env_name, config_key in REQUIRED_SECRETS.items():
+        config[config_key] = os.getenv(env_name)
+
+    if require_secrets:
+        missing = [name for name in REQUIRED_SECRETS if not os.getenv(name)]
+        if missing:
+            raise EnvironmentError(f"Missing required environment variables: {', '.join(missing)}")
+
+    symbols = config["trading"].get("symbols", [])
+    if not symbols:
+        raise ValueError("trading.symbols must contain at least one CCXT symbol")
+    for timeframe_key in ("daily", "h4", "h1", "m15"):
+        if timeframe_key not in config["market_data"]["timeframes"]:
+            raise ValueError(f"market_data.timeframes.{timeframe_key} is required")
+
+    logger.info("Configuration loaded successfully.")
     return config

@@ -1,91 +1,211 @@
+from __future__ import annotations
+
+import json
 import os
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
 import torch
+import torch.nn as nn
 import torch.optim as optim
-import pandas as pd
 
-# --- FIX: Add project root to Python path ---
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from models.predictors import SignalValidatorGRU
-from models.feature_engineering import FeatureEngineer
 from core.engine import SMCEngine
-from utils.config_loader import load_all_configs
 from data.exchange_api import ExchangeInterface
+from models.feature_engineering import FEATURE_COLUMNS, FEATURE_VERSION, FeatureEngineer
+from models.gru import SignalValidatorGRU
+from utils.config_loader import load_all_configs
 
 
-def generate_smc_dataframe(config):
-    """
-    Fetch real market data and generate SMC-enriched dataframe.
-    """
+def build_dataset(config: dict):
     exchange = ExchangeInterface(config)
     engine = SMCEngine(config)
+    symbols = config["trading"]["symbols"]
+    m15_tf = config["market_data"]["timeframes"]["m15"]
+    limit = max(1000, int(config["market_data"]["limits"]["m15"]))
+    frames = []
 
-    symbol = "BTC/USDT:USDT"
+    for symbol in symbols:
+        frame = exchange.fetch_ohlcv(symbol, m15_tf, limit=limit)
+        processed = engine._process_structure(frame, zones=True)
+        processed = engine.liquidity.identify_liquidity_pools(processed)
+        processed = engine.liquidity.detect_sweeps(processed)
+        processed["symbol"] = symbol
+        frames.append(processed)
 
-    macro_df = exchange.fetch_ohlcv(symbol, config['timeframes']['macro'], limit=300)
-    micro_df = exchange.fetch_ohlcv(symbol, config['timeframes']['micro'], limit=300)
-
-    if macro_df.empty or micro_df.empty:
-        raise ValueError("Failed to fetch data for training.")
-
-    # Run SMC pipeline
-    _, macro_processed, micro_processed = engine.process_market(macro_df, micro_df)
-
-    return micro_processed
+    if not frames:
+        raise RuntimeError("No real training data was retrieved")
+    return frames
 
 
-def train_on_history(df):
+def build_labels(frame, config: dict) -> np.ndarray:
     fe = FeatureEngineer()
+    atr = fe._atr(frame).to_numpy()
+    rr = float(config["risk_management"]["default_tp_rr"])
+    sl_mult = float(config["risk_management"]["atr_sl_multiplier"])
+    horizon = int(config["model"].get("label_horizon", 20))
+    labels = np.full(len(frame), np.nan)
 
-    # Ensure required columns exist
-    for col in ['bos', 'fvg', 'order_block']:
-        if col not in df.columns:
-            df[col] = None
+    for i in range(len(frame) - horizon):
+        if not np.isfinite(atr[i]) or atr[i] <= 0:
+            continue
+        sweep = frame.iloc[i].get("liquidity_sweep")
+        bos = frame.iloc[i].get("bos")
+        direction = 1 if sweep == "BULLISH_SWEEP" or bos == "BULLISH_BOS" else -1 if sweep == "BEARISH_SWEEP" or bos == "BEARISH_BOS" else np.sign(frame["close"].iloc[i] - frame["close"].iloc[max(0, i - 5)])
+        if direction == 0:
+            continue
+        entry = float(frame["close"].iloc[i])
+        risk = float(atr[i]) * sl_mult
+        target = entry + direction * risk * rr
+        stop = entry - direction * risk
+        future = frame.iloc[i + 1 : i + horizon + 1]
+        hit_target = (future["high"] >= target) if direction > 0 else (future["low"] <= target)
+        hit_stop = (future["low"] <= stop) if direction > 0 else (future["high"] >= stop)
+        target_idx = np.flatnonzero(hit_target.to_numpy())
+        stop_idx = np.flatnonzero(hit_stop.to_numpy())
+        if target_idx.size == 0 and stop_idx.size == 0:
+            continue
+        if target_idx.size and stop_idx.size and target_idx[0] == stop_idx[0]:
+            labels[i] = 0.0
+        elif target_idx.size and (not stop_idx.size or target_idx[0] < stop_idx[0]):
+            labels[i] = 1.0
+        else:
+            labels[i] = 0.0
+    return labels
 
-    data = fe.prepare_smc_features(df)
 
-    # Target: price increases 1% within next 10 candles
-    targets = (df['close'].shift(-10) > df['close'] * 1.01).astype(int).fillna(0).values
+def sequence_dataset(frame, config: dict):
+    sequence_length = int(config["model"]["sequence_length"])
+    fe = FeatureEngineer(sequence_length)
+    raw_features = fe.build_features(frame)
+    labels = build_labels(frame, config)
+    valid = np.where(np.isfinite(labels))[0]
+    valid = valid[valid >= sequence_length - 1]
+    if len(valid) < 200:
+        raise RuntimeError(f"Not enough labeled samples: {len(valid)}")
+    return raw_features, labels, valid
 
-    model = SignalValidatorGRU()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    criterion = torch.nn.BCELoss()
 
-    # Convert to tensors
-    X = torch.FloatTensor(data).unsqueeze(0)
-    y = torch.FloatTensor(targets).unsqueeze(0).unsqueeze(-1)
+def make_sequences(features: np.ndarray, labels: np.ndarray, indices: np.ndarray, scaler: FeatureEngineer):
+    scaled = scaler.scaler.transform(features)
+    X = np.stack([scaled[i - scaler.sequence_length + 1 : i + 1] for i in indices])
+    y = labels[indices]
+    return torch.tensor(X, dtype=torch.float32), torch.tensor(y[:, None], dtype=torch.float32)
 
-    model.train()
 
-    for epoch in range(5):
+def evaluate(model, X, y):
+    from sklearn.metrics import accuracy_score, precision_score, recall_score, roc_auc_score
+    model.eval()
+    with torch.no_grad():
+        probs = model(X).cpu().numpy().ravel()
+    truth = y.cpu().numpy().ravel()
+    threshold = 0.5
+    pred = (probs >= threshold).astype(int)
+    return {
+        "accuracy": float(accuracy_score(truth, pred)),
+        "precision": float(precision_score(truth, pred, zero_division=0)),
+        "recall": float(recall_score(truth, pred, zero_division=0)),
+        "roc_auc": float(roc_auc_score(truth, probs)) if len(np.unique(truth)) > 1 else 0.5,
+    }, probs, truth
+
+
+def train(config: dict) -> None:
+    frames = build_dataset(config)
+    sequence_length = int(config["model"]["sequence_length"])
+    all_train_features = []
+    datasets = []
+    for frame in frames:
+        features, labels, indices = sequence_dataset(frame, config)
+        split1 = int(len(indices) * 0.70)
+        split2 = int(len(indices) * 0.85)
+        datasets.append((features, labels, indices, split1, split2))
+        all_train_features.append(features.iloc[: indices[split1] + 1])
+
+    fit_engineer = FeatureEngineer(sequence_length)
+    fit_engineer.scaler.fit(np.concatenate([f.to_numpy() for f in all_train_features], axis=0))
+
+    train_x, train_y, val_x, val_y, test_x, test_y = [], [], [], [], [], []
+    for features, labels, indices, split1, split2 in datasets:
+        train_indices = indices[:split1]
+        val_indices = indices[split1:split2]
+        test_indices = indices[split2:]
+        x, y = make_sequences(features.to_numpy(), labels, train_indices, fit_engineer)
+        train_x.append(x); train_y.append(y)
+        x, y = make_sequences(features.to_numpy(), labels, val_indices, fit_engineer)
+        val_x.append(x); val_y.append(y)
+        x, y = make_sequences(features.to_numpy(), labels, test_indices, fit_engineer)
+        test_x.append(x); test_y.append(y)
+
+    X_train, y_train = torch.cat(train_x), torch.cat(train_y)
+    X_val, y_val = torch.cat(val_x), torch.cat(val_y)
+    X_test, y_test = torch.cat(test_x), torch.cat(test_y)
+
+    model = SignalValidatorGRU(input_dim=len(FEATURE_COLUMNS))
+    optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+    criterion = nn.BCELoss()
+    best_state = None
+    best_val_auc = -1.0
+
+    for epoch in range(20):
+        model.train()
         optimizer.zero_grad()
-        outputs = model(X)
-        loss = criterion(outputs, y[:, -1, :])
+        loss = criterion(model(X_train), y_train)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
+        metrics, _, _ = evaluate(model, X_val, y_val)
+        print(f"epoch={epoch + 1} loss={loss.item():.5f} val_auc={metrics['roc_auc']:.4f}")
+        if metrics["roc_auc"] > best_val_auc:
+            best_val_auc = metrics["roc_auc"]
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
-        print(f"Epoch {epoch+1} Loss: {loss.item():.4f}")
+    if best_state is None:
+        raise RuntimeError("Training produced no valid model state")
+    model.load_state_dict(best_state)
+    val_metrics, val_probs, val_truth = evaluate(model, X_val, y_val)
+    test_metrics, _, _ = evaluate(model, X_test, y_test)
 
-    os.makedirs('models/weights', exist_ok=True)
-    torch.save(model.state_dict(), 'models/weights/latest_gru.pth')
+    thresholds = np.linspace(0.50, 0.80, 31)
+    best_threshold = 0.60
+    best_f1 = -1.0
+    for threshold in thresholds:
+        pred = (val_probs >= threshold).astype(int)
+        tp = ((pred == 1) & (val_truth == 1)).sum()
+        fp = ((pred == 1) & (val_truth == 0)).sum()
+        fn = ((pred == 0) & (val_truth == 1)).sum()
+        precision = tp / max(tp + fp, 1)
+        recall = tp / max(tp + fn, 1)
+        f1 = 2 * precision * recall / max(precision + recall, 1e-12)
+        if f1 > best_f1:
+            best_f1, best_threshold = f1, float(threshold)
 
-    print("Model trained and saved successfully.")
+    minimum_auc = float(config["model"].get("minimum_test_auc", 0.55))
+    if test_metrics["roc_auc"] < minimum_auc:
+        raise RuntimeError(f"Model rejected: test ROC-AUC {test_metrics['roc_auc']:.4f} < {minimum_auc:.4f}")
+
+    weights = Path(config["model"]["path"])
+    scaler_path = Path(config["model"]["scaler_path"])
+    metadata_path = Path(config["model"]["metadata_path"])
+    weights.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), weights)
+    fit_engineer.save_scaler(str(scaler_path))
+    metadata = {
+        "model_version": datetime.now(timezone.utc).strftime("gru-%Y%m%dT%H%M%SZ"),
+        "feature_version": FEATURE_VERSION,
+        "feature_columns": FEATURE_COLUMNS,
+        "sequence_length": sequence_length,
+        "decision_threshold": best_threshold,
+        "validation": val_metrics,
+        "test": test_metrics,
+        "trained_symbols": config["trading"]["symbols"],
+        "label": "TP-before-SL with ATR-based 1.5R/2R outcome",
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    print(json.dumps(metadata, indent=2))
 
 
 if __name__ == "__main__":
-    print("Starting training pipeline...")
-
-    config = load_all_configs()
-
-    try:
-        df = generate_smc_dataframe(config)
-    except Exception as e:
-        print(f"Data fetch failed: {e}")
-        print("Falling back to synthetic data.")
-
-        df = pd.DataFrame({
-            'close': [100 + i for i in range(200)]
-        })
-
-    train_on_history(df)
+    train(load_all_configs())

@@ -1,46 +1,49 @@
-name: Nexus Live Signal Monitor
+name: SMC Live Signal Monitor
 
 on:
   schedule:
-    - cron: "*/15 * * * *"  # Executes every 15 minutes
-  workflow_dispatch:        # Enables manual triggering from the GitHub Actions tab
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: nexus-live-signal-monitor
-  cancel-in-progress: false  # Queues overlapping runs to prevent API collision
+  group: smc-live-signal-monitor
+  cancel-in-progress: false
 
 jobs:
   execute_signal_pipeline:
     name: Ingest, Analyze & Broadcast Signals
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 8
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-          cache: 'pip'
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements-live.txt
 
-      - name: Install Project Dependencies
+      - name: Install Live Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-live.txt
 
-      - name: Run Signal Engine Daemon
+      - name: Verify Model Artifacts
+        run: |
+          test -f models/weights/latest_gru.pth
+          test -f models/weights/feature_scaler.joblib
+          test -f models/weights/model_metadata.json
+
+      - name: Run Signal Engine
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           PYTHONPATH: .
-        run: |
-          echo "🚀 Starting Nexus Signal Pipeline..."
-          python main.py
+        run: python main.py
