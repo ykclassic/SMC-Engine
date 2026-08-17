@@ -45,6 +45,12 @@ order_blocks:
   require_fvg: false
   mitigation_threshold: 0.5
 
+training_events:
+  continuation_window: 8
+  minimum_candidate_spacing: 3
+  max_candidates_per_event: 3
+  minimum_labeled_candidates_per_symbol: 300
+
 confluence:
   minimum_score: 0.70
   weights:
