@@ -18,7 +18,7 @@ market_data:
     h4: 400
     h1: 400
     m15: 500
-  training_history_candles: 5000
+  training_history_candles: 10000
   max_candle_age_minutes: 20
   minimum_rows:
     daily: 100
