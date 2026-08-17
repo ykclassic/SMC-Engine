@@ -26,6 +26,10 @@ env:
   PYTHONPATH: .
   PYTHONUNBUFFERED: "1"
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   retrain-model:
     name: Train, Validate, and Version Model
@@ -76,10 +80,10 @@ jobs:
           set -euo pipefail
           python -m compileall -q core scripts models data utils
 
-      - name: Training Event Contract Tests
+      - name: Full Test Suite
         run: |
           set -euo pipefail
-          python -m pytest -q tests/test_training_events.py
+          python -m pytest -q
 
       # ------------------------------------------------------------
       # RUNTIME DIAGNOSTICS
@@ -414,7 +418,7 @@ jobs:
             echo "Promotion gates:"
             echo ""
             echo "1. Python compilation"
-            echo "2. SMC training-event contract tests"
+            echo "2. Full repository test suite"
             echo "3. Real exchange data training"
             echo "4. Complete model/scaler/metadata artifact set"
             echo "5. Metadata schema validation"
