@@ -154,7 +154,7 @@ def test_training_builder_opt_in_recovery_expands_sparse_dataset():
     assert len(candidates) >= 10
 
 
-def test_exact_298_label_shortfall_still_requires_recovery():
+def test_exact_298_label_shortfall_triggers_recovery_before_300_gate():
     builder = SMCTrainingEventBuilder(
         {
             "training_events": {
@@ -168,6 +168,17 @@ def test_exact_298_label_shortfall_still_requires_recovery():
     assert builder.minimum_labeled_candidates == 300
     assert builder.recovery_needed(298) is True
     assert builder.recovery_needed(299) is True
+    assert builder.recovery_needed(300) is False
+    assert builder.recovery_iterations == 0
+
+    # The 298-label state must cause recovery rather than changing the hard
+    # minimum. Once the downstream label-aware controller reaches 300 usable
+    # labels, recovery is no longer required.
+    builder.expand_capacity(frame_length=1024)
+
+    assert builder.recovery_mode is True
+    assert builder.recovery_iterations == 1
+    assert builder.recovery_needed(298) is True
     assert builder.recovery_needed(300) is False
 
 
