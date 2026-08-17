@@ -18,6 +18,7 @@ market_data:
     h4: 400
     h1: 400
     m15: 500
+  training_history_candles: 5000
   max_candle_age_minutes: 20
   minimum_rows:
     daily: 100
@@ -60,7 +61,10 @@ model:
   scaler_path: models/weights/feature_scaler.joblib
   metadata_path: models/weights/model_metadata.json
   sequence_length: 32
+  label_horizon: 20
   min_confidence: 0.60
+  minimum_test_auc: 0.55
+  minimum_test_precision: 0.45
   expected_feature_version: smc-v2
 
 risk_management:
