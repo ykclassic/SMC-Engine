@@ -123,13 +123,17 @@ class ExchangeInterface:
         timeframe: str,
         candles: int = 5000,
     ) -> pd.DataFrame:
-        """Fetch a historical window by forward pagination.
+        """Fetch closed OHLCV history using a backward-moving time cursor.
 
-        Exchanges may legitimately return fewer rows than the requested page
-        size without indicating that the requested historical window has been
-        exhausted. A short page therefore must not terminate pagination. The
-        loop stops only when the exchange returns no data, the requested candle
-        count is reached, or the cursor fails to advance.
+        Bitget's contract candle APIs have different recent/history limits and
+        the history endpoint caps each response at 200 candles. Paging backward
+        from the current time lets CCXT select the appropriate endpoint for
+        each page and avoids constructing a forward request whose start/end
+        range crosses an endpoint boundary incorrectly.
+
+        A short page is not treated as end-of-history. Pagination stops only
+        when the exchange returns no data, the requested candle count is met,
+        or the cursor fails to move backward.
         """
 
         if symbol not in self.exchange.markets:
@@ -140,31 +144,30 @@ class ExchangeInterface:
         candles = max(1, int(candles))
         page_size = min(1000, candles)
         timeframe_ms = self.exchange.parse_timeframe(timeframe) * 1000
-        now_ms = int(
+        until = int(
             datetime.now(timezone.utc).timestamp() * 1000
         )
-        since = now_ms - (candles + 5) * timeframe_ms
 
         all_rows: list[list] = []
         seen_cursors: set[int] = set()
 
         while len(all_rows) < candles:
-            if since in seen_cursors:
+            if until in seen_cursors:
                 self.logger.warning(
                     "Bitget OHLCV pagination cursor repeated for %s %s at %s; stopping.",
                     symbol,
                     timeframe,
-                    since,
+                    until,
                 )
                 break
 
-            seen_cursors.add(since)
+            seen_cursors.add(until)
 
             batch = self.exchange.fetch_ohlcv(
                 symbol,
                 timeframe,
-                since=since,
                 limit=page_size,
+                params={"until": until},
             )
 
             if not batch:
@@ -172,28 +175,30 @@ class ExchangeInterface:
 
             all_rows.extend(batch)
 
-            last_timestamp = int(batch[-1][0])
-            next_since = last_timestamp + timeframe_ms
+            timestamps = [int(row[0]) for row in batch]
+            oldest_timestamp = min(timestamps)
+            next_until = oldest_timestamp - 1
 
-            if next_since <= since:
+            if next_until >= until:
                 self.logger.warning(
-                    "Bitget OHLCV pagination did not advance for %s %s: since=%s next_since=%s; stopping.",
+                    "Bitget OHLCV pagination did not move backward for %s %s: until=%s next_until=%s; stopping.",
                     symbol,
                     timeframe,
-                    since,
-                    next_since,
+                    until,
+                    next_until,
                 )
                 break
 
-            since = next_since
+            until = next_until
 
             self.logger.debug(
-                "Fetched %d OHLCV rows for %s %s; accumulated=%d/%d.",
+                "Fetched %d OHLCV rows for %s %s; accumulated=%d/%d; next_until=%d.",
                 len(batch),
                 symbol,
                 timeframe,
                 len(all_rows),
                 candles,
+                until,
             )
 
         frame = self._drop_open_candle(
