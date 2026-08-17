@@ -76,6 +76,33 @@ def test_training_builder_emits_canonical_candidate_schema():
     assert candidates["distance_from_event"].max() <= 8
 
 
+def test_training_builder_does_not_globally_suppress_nearby_events():
+    config = {
+        "training_events": {
+            "continuation_window": 4,
+            "minimum_candidate_spacing": 3,
+            "max_candidates_per_event": 3,
+        }
+    }
+
+    frame = make_frame(30)
+    frame["bos"] = None
+    frame["choch"] = None
+    frame["liquidity_sweep"] = None
+    frame["fvg"] = None
+    frame["ob_event"] = None
+    frame.loc[5, "bos"] = "BULLISH_BOS"
+    frame.loc[7, "fvg"] = "BULLISH_FVG"
+
+    builder = SMCTrainingEventBuilder(config)
+    candidates = builder.build(frame)
+
+    # The second event must retain its own causal candidate window instead of
+    # being suppressed by a global direction-level spacing cursor.
+    assert 7 in set(candidates["candidate_index"])
+    assert len(candidates) >= 4
+
+
 def test_training_builder_labels_use_canonical_direction_values():
     config = {
         "training_events": {
@@ -116,3 +143,39 @@ def test_training_builder_labels_use_canonical_direction_values():
     assert labels["candidate_index"].dtype.kind in "iu"
     assert set(labels["label"].unique()) <= {0.0, 1.0}
     assert labels.iloc[0]["label"] == 1.0
+
+
+def test_unresolved_candidate_is_retained_as_negative_label():
+    config = {
+        "training_events": {
+            "continuation_window": 0,
+            "minimum_candidate_spacing": 1,
+            "max_candidates_per_event": 1,
+        }
+    }
+
+    frame = make_frame(60)
+    frame["bos"] = None
+    frame["choch"] = None
+    frame["liquidity_sweep"] = None
+    frame["fvg"] = None
+    frame["ob_event"] = None
+    frame.loc[10, "bos"] = "BULLISH_BOS"
+
+    # Keep the future range inside both TP and SL so the candidate is
+    # unresolved during the label horizon.
+    builder = SMCTrainingEventBuilder(config)
+    candidates = builder.build(frame)
+    atr = pd.Series(10.0, index=frame.index)
+
+    labels = builder.label_candidates(
+        frame,
+        candidates,
+        atr,
+        sl_multiplier=1.0,
+        rr=2.0,
+        horizon=5,
+    )
+
+    assert len(labels) == 1
+    assert labels.iloc[0]["label"] == 0.0
