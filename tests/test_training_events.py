@@ -93,6 +93,11 @@ def test_training_builder_labels_use_canonical_direction_values():
     frame["ob_event"] = None
     frame.loc[10, "bos"] = "BULLISH_BOS"
 
+    # Force a deterministic TP hit after the candidate while leaving the
+    # stop untouched. This tests the label contract rather than market-data
+    # randomness.
+    frame.loc[11:15, "high"] = [101.0, 101.1, 101.2, 101.3, 101.4]
+
     builder = SMCTrainingEventBuilder(config)
     candidates = builder.build(frame)
 
@@ -102,7 +107,7 @@ def test_training_builder_labels_use_canonical_direction_values():
         candidates,
         atr,
         sl_multiplier=1.0,
-        rr=1.0,
+        rr=0.2,
         horizon=5,
     )
 
@@ -110,3 +115,4 @@ def test_training_builder_labels_use_canonical_direction_values():
     assert set(labels["direction"]) <= {"LONG", "SHORT"}
     assert labels["candidate_index"].dtype.kind in "iu"
     assert set(labels["label"].unique()) <= {0.0, 1.0}
+    assert labels.iloc[0]["label"] == 1.0
