@@ -42,19 +42,26 @@ EVENT_COLUMNS = (
 class SMCTrainingEventBuilder:
     """Build causal SMC candidates for supervised model training.
 
-    The builder deliberately treats each detected SMC event as an origin.
-    A candle can contain more than one confirmed event; all such events are
-    allowed to contribute their own causal continuation windows. Candidate
-    observations are still deduplicated at the final candle/direction level
-    because the GRU input at a given candle is identical for the same side.
+    Every confirmed SMC event is treated as an origin. Candidate observations
+    are created only on the event candle or on subsequent candles inside the
+    configured continuation window, so no future candle is used to create an
+    event.
 
-    This avoids the old single-event priority rule, which discarded every
-    lower-priority event on a candle and could materially starve the training
-    dataset. No future candle is used to create an event origin.
+    Candidate generation has a deterministic recovery mode. If the configured
+    event window cannot supply enough distinct observations for the downstream
+    training quality gate, the builder widens the continuation window and
+    spacing constraints rather than fabricating data or lowering the quality
+    gate. The recovery remains causal and uses only real candles.
+
+    Multiple SMC events may resolve to the same candle/direction. Such
+    observations are deduplicated because the GRU input is identical for that
+    candle/side.
     """
 
     def __init__(self, config: dict) -> None:
         training = config.get("training_events", {})
+        model = config.get("model", {})
+
         self.window = max(
             0,
             int(training.get("continuation_window", 8)),
@@ -66,6 +73,19 @@ class SMCTrainingEventBuilder:
         self.max_candidates_per_event = max(
             1,
             int(training.get("max_candidates_per_event", 3)),
+        )
+        self.minimum_labeled_candidates = max(
+            1,
+            int(
+                training.get(
+                    "minimum_labeled_candidates_per_symbol",
+                    300,
+                )
+            ),
+        )
+        self.label_horizon = max(
+            0,
+            int(model.get("label_horizon", 20)),
         )
         self.last_build_stats: dict = {}
         self.last_label_stats: dict = {}
@@ -105,8 +125,11 @@ class SMCTrainingEventBuilder:
             return "SHORT"
         raise ValueError(f"Unsupported training direction: {direction}")
 
-    def build(self, frame: pd.DataFrame) -> pd.DataFrame:
-        """Build causal event/continuation candidates from all confirmed events."""
+    @staticmethod
+    def _unique_candidates(
+        candidates: list[TrainingCandidate],
+    ) -> pd.DataFrame:
+        """Convert candidates to the canonical deduplicated DataFrame."""
 
         columns = [
             "candidate_index",
@@ -115,75 +138,7 @@ class SMCTrainingEventBuilder:
             "distance_from_event",
         ]
 
-        if frame.empty:
-            self.last_build_stats = {
-                "rows": 0,
-                "event_count": 0,
-                "event_counts": {},
-                "raw_candidates": 0,
-                "unique_candidates": 0,
-            }
-            return pd.DataFrame(columns=columns)
-
-        candidates: list[TrainingCandidate] = []
-        event_indices: list[tuple[int, str, int]] = []
-        event_counts: Counter[str] = Counter()
-
-        for index in range(len(frame)):
-            for event_type, direction in self._events_at(frame.iloc[index]):
-                event_indices.append((index, event_type, direction))
-                event_counts[event_type] += 1
-
-        for event_index, event_type, direction in event_indices:
-            emitted = 0
-            last_candidate_index = -10**9
-
-            for distance in range(self.window + 1):
-                candidate_index = event_index + distance
-
-                if candidate_index >= len(frame):
-                    break
-
-                if candidate_index < last_candidate_index + self.min_spacing:
-                    continue
-
-                row = frame.iloc[candidate_index]
-                close = float(row["close"])
-                open_price = float(row["open"])
-
-                # Continuation candidates must close in the originating
-                # direction. The event candle itself is always eligible.
-                if distance > 0:
-                    if direction > 0 and close < open_price:
-                        continue
-                    if direction < 0 and close > open_price:
-                        continue
-
-                candidates.append(
-                    TrainingCandidate(
-                        candidate_index=candidate_index,
-                        direction=self._direction_name(direction),
-                        event_type=event_type,
-                        distance_from_event=distance,
-                    )
-                )
-
-                last_candidate_index = candidate_index
-                emitted += 1
-
-                if emitted >= self.max_candidates_per_event:
-                    break
-
-        raw_candidate_count = len(candidates)
-
         if not candidates:
-            self.last_build_stats = {
-                "rows": int(len(frame)),
-                "event_count": int(len(event_indices)),
-                "event_counts": dict(sorted(event_counts.items())),
-                "raw_candidates": 0,
-                "unique_candidates": 0,
-            }
             return pd.DataFrame(columns=columns)
 
         result = pd.DataFrame(
@@ -199,7 +154,7 @@ class SMCTrainingEventBuilder:
             columns=columns,
         )
 
-        result = (
+        return (
             result.sort_values(
                 ["candidate_index", "direction"],
                 kind="stable",
@@ -218,6 +173,143 @@ class SMCTrainingEventBuilder:
             .reset_index(drop=True)
         )
 
+    def _emit_candidates(
+        self,
+        frame: pd.DataFrame,
+        event_indices: list[tuple[int, str, int]],
+        window: int,
+        spacing: int,
+        max_candidates_per_event: int,
+    ) -> list[TrainingCandidate]:
+        """Emit causal continuation observations using explicit constraints."""
+
+        candidates: list[TrainingCandidate] = []
+
+        for event_index, event_type, direction in event_indices:
+            emitted = 0
+            last_candidate_index = -10**9
+
+            for distance in range(window + 1):
+                candidate_index = event_index + distance
+
+                if candidate_index >= len(frame):
+                    break
+
+                if candidate_index < last_candidate_index + spacing:
+                    continue
+
+                # A post-event candle remains a valid causal observation even
+                # when its body temporarily moves against the event direction.
+                # The eventual TP-before-SL label determines whether that
+                # observation was successful. Filtering by candle body here
+                # would discard valid negative and recovery examples.
+                candidates.append(
+                    TrainingCandidate(
+                        candidate_index=candidate_index,
+                        direction=self._direction_name(direction),
+                        event_type=event_type,
+                        distance_from_event=distance,
+                    )
+                )
+
+                last_candidate_index = candidate_index
+                emitted += 1
+
+                if emitted >= max_candidates_per_event:
+                    break
+
+        return candidates
+
+    def build(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """Build causal event/continuation candidates from all confirmed events."""
+
+        columns = [
+            "candidate_index",
+            "direction",
+            "event_type",
+            "distance_from_event",
+        ]
+
+        if frame.empty:
+            self.last_build_stats = {
+                "rows": 0,
+                "event_count": 0,
+                "event_counts": {},
+                "raw_candidates": 0,
+                "unique_candidates": 0,
+                "recovery_mode": False,
+            }
+            return pd.DataFrame(columns=columns)
+
+        event_indices: list[tuple[int, str, int]] = []
+        event_counts: Counter[str] = Counter()
+
+        for index in range(len(frame)):
+            for event_type, direction in self._events_at(frame.iloc[index]):
+                event_indices.append((index, event_type, direction))
+                event_counts[event_type] += 1
+
+        if not event_indices:
+            self.last_build_stats = {
+                "rows": int(len(frame)),
+                "event_count": 0,
+                "event_counts": {},
+                "raw_candidates": 0,
+                "unique_candidates": 0,
+                "recovery_mode": False,
+            }
+            return pd.DataFrame(columns=columns)
+
+        # Build enough candidates to satisfy the downstream labeled-sample
+        # gate after accounting for the forward label horizon. This is a target
+        # for real observations, not a reason to relax the quality gate.
+        target_candidates = (
+            self.minimum_labeled_candidates
+            + self.label_horizon
+        )
+
+        candidates = self._emit_candidates(
+            frame,
+            event_indices,
+            self.window,
+            self.min_spacing,
+            self.max_candidates_per_event,
+        )
+        result = self._unique_candidates(candidates)
+        recovery_mode = False
+        recovery_window = self.window
+        recovery_spacing = self.min_spacing
+        recovery_max = self.max_candidates_per_event
+
+        if len(result) < target_candidates:
+            recovery_mode = True
+            recovery_spacing = 1
+            recovery_window = max(
+                self.window,
+                min(
+                    64,
+                    max(
+                        self.window + self.label_horizon,
+                        32,
+                    ),
+                ),
+            )
+            recovery_max = max(
+                self.max_candidates_per_event,
+                int(np.ceil(target_candidates / len(event_indices))) + 2,
+            )
+
+            candidates = self._emit_candidates(
+                frame,
+                event_indices,
+                recovery_window,
+                recovery_spacing,
+                recovery_max,
+            )
+            result = self._unique_candidates(candidates)
+
+        raw_candidate_count = len(candidates)
+
         self.last_build_stats = {
             "rows": int(len(frame)),
             "event_count": int(len(event_indices)),
@@ -227,6 +319,11 @@ class SMCTrainingEventBuilder:
             "candidate_deduplication": int(
                 raw_candidate_count - len(result)
             ),
+            "target_candidates": int(target_candidates),
+            "recovery_mode": recovery_mode,
+            "recovery_window": int(recovery_window),
+            "recovery_spacing": int(recovery_spacing),
+            "recovery_max_candidates_per_event": int(recovery_max),
         }
 
         print(
@@ -234,6 +331,8 @@ class SMCTrainingEventBuilder:
             f"events={len(event_indices)} "
             f"raw_candidates={raw_candidate_count} "
             f"unique_candidates={len(result)} "
+            f"target_candidates={target_candidates} "
+            f"recovery_mode={recovery_mode} "
             f"event_counts={dict(sorted(event_counts.items()))}"
         )
 
@@ -334,6 +433,4 @@ class SMCTrainingEventBuilder:
     ) -> None:
         """Compatibility hook retained for callers that inspect label output only."""
 
-        # The instance-level stats are populated by the wrapper below when
-        # possible. This static method intentionally performs no I/O.
         _ = result, skipped_horizon, skipped_atr, positive_labels
