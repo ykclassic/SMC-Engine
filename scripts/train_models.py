@@ -1,3 +1,5 @@
+"""Train only on real exchange data and promote only validated artifacts."""
+
 from __future__ import annotations
 
 import hashlib
