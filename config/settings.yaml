@@ -78,6 +78,12 @@ model:
   minimum_test_auc: 0.55
   minimum_test_precision: 0.45
   expected_feature_version: smc-v3
+  threshold_minimum: 0.20
+  threshold_maximum: 0.85
+  threshold_steps: 131
+  calibration_validation_windows: 3
+  calibration_minimum_coverage: 0.005
+  calibration_max_precision_std: 0.20
 
 risk_management:
   default_tp_rr: 2.0
