@@ -11,6 +11,7 @@ on:
       - ".github/workflows/ai_retrain.yml"
       - "scripts/train_models.py"
       - "scripts/train_models_calibrated.py"
+      - "scripts/train_models_calibration_diagnostic.py"
       - "scripts/validate_model.py"
       - "core/**"
       - "models/**/*.py"
@@ -104,7 +105,7 @@ jobs:
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
         run: |
           set -euo pipefail
-          python scripts/train_models_calibrated.py
+          python scripts/train_models_calibration_diagnostic.py
 
       - name: Verify Training Artifacts
         run: |
@@ -229,7 +230,7 @@ jobs:
             echo "- Workflow: \`${GITHUB_RUN_ID}\`"
             echo "- Status: \`${{ job.status }}\`"
             echo "- Training: class-weighted BCE"
-            echo "- Calibration: validation-only threshold search"
+            echo "- Calibration: aggregate validation threshold + chronological stability diagnostics"
             echo "- Test set: frozen and untouched during threshold selection"
             echo "- Promotion: only after artifact, metric, and hash gates pass"
           } >> "$GITHUB_STEP_SUMMARY"
