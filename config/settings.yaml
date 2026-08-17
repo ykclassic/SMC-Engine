@@ -50,6 +50,8 @@ training_events:
   minimum_candidate_spacing: 3
   max_candidates_per_event: 3
   minimum_labeled_candidates_per_symbol: 300
+  recovery_continuation_window: 512
+  recovery_max_candidates_per_event: 512
 
 confluence:
   minimum_score: 0.70
