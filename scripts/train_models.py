@@ -13,7 +13,9 @@ import torch.optim as optim
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from core.engine import SMCEngine
+from core.liquidity import LiquidityEngine
+from core.structure import MarketStructureDetector
+from core.zones import ZoneEngine
 from data.exchange_api import ExchangeInterface
 from models.feature_engineering import FEATURE_COLUMNS, FEATURE_VERSION, FeatureEngineer
 from models.gru import SignalValidatorGRU
@@ -22,7 +24,9 @@ from utils.config_loader import load_all_configs
 
 def build_dataset(config: dict):
     exchange = ExchangeInterface(config)
-    engine = SMCEngine(config)
+    structure = MarketStructureDetector(config)
+    liquidity = LiquidityEngine(config)
+    zones = ZoneEngine(config)
     symbols = config["trading"]["symbols"]
     m15_tf = config["market_data"]["timeframes"]["m15"]
     limit = max(1000, int(config["market_data"]["limits"]["m15"]))
@@ -30,9 +34,11 @@ def build_dataset(config: dict):
 
     for symbol in symbols:
         frame = exchange.fetch_ohlcv(symbol, m15_tf, limit=limit)
-        processed = engine._process_structure(frame, zones=True)
-        processed = engine.liquidity.identify_liquidity_pools(processed)
-        processed = engine.liquidity.detect_sweeps(processed)
+        processed = structure.analyze(frame)
+        processed = zones.detect_fvg(processed)
+        processed = zones.find_order_blocks(processed)
+        processed = liquidity.identify_liquidity_pools(processed)
+        processed = liquidity.detect_sweeps(processed)
         processed["symbol"] = symbol
         frames.append(processed)
 
@@ -102,8 +108,7 @@ def evaluate(model, X, y):
     with torch.no_grad():
         probs = model(X).cpu().numpy().ravel()
     truth = y.cpu().numpy().ravel()
-    threshold = 0.5
-    pred = (probs >= threshold).astype(int)
+    pred = (probs >= 0.5).astype(int)
     return {
         "accuracy": float(accuracy_score(truth, pred)),
         "precision": float(precision_score(truth, pred, zero_division=0)),
@@ -115,29 +120,28 @@ def evaluate(model, X, y):
 def train(config: dict) -> None:
     frames = build_dataset(config)
     sequence_length = int(config["model"]["sequence_length"])
-    all_train_features = []
     datasets = []
+    train_feature_frames = []
     for frame in frames:
         features, labels, indices = sequence_dataset(frame, config)
         split1 = int(len(indices) * 0.70)
         split2 = int(len(indices) * 0.85)
         datasets.append((features, labels, indices, split1, split2))
-        all_train_features.append(features.iloc[: indices[split1] + 1])
+        train_feature_frames.append(features.iloc[: indices[split1] + 1])
 
     fit_engineer = FeatureEngineer(sequence_length)
-    fit_engineer.scaler.fit(np.concatenate([f.to_numpy() for f in all_train_features], axis=0))
+    fit_engineer.scaler.fit(np.concatenate([f.to_numpy() for f in train_feature_frames], axis=0))
 
     train_x, train_y, val_x, val_y, test_x, test_y = [], [], [], [], [], []
     for features, labels, indices, split1, split2 in datasets:
-        train_indices = indices[:split1]
-        val_indices = indices[split1:split2]
-        test_indices = indices[split2:]
-        x, y = make_sequences(features.to_numpy(), labels, train_indices, fit_engineer)
-        train_x.append(x); train_y.append(y)
-        x, y = make_sequences(features.to_numpy(), labels, val_indices, fit_engineer)
-        val_x.append(x); val_y.append(y)
-        x, y = make_sequences(features.to_numpy(), labels, test_indices, fit_engineer)
-        test_x.append(x); test_y.append(y)
+        for destination_x, destination_y, selected in (
+            (train_x, train_y, indices[:split1]),
+            (val_x, val_y, indices[split1:split2]),
+            (test_x, test_y, indices[split2:]),
+        ):
+            x, y = make_sequences(features.to_numpy(), labels, selected, fit_engineer)
+            destination_x.append(x)
+            destination_y.append(y)
 
     X_train, y_train = torch.cat(train_x), torch.cat(train_y)
     X_val, y_val = torch.cat(val_x), torch.cat(val_y)
@@ -169,8 +173,7 @@ def train(config: dict) -> None:
     test_metrics, _, _ = evaluate(model, X_test, y_test)
 
     thresholds = np.linspace(0.50, 0.80, 31)
-    best_threshold = 0.60
-    best_f1 = -1.0
+    best_threshold, best_f1 = 0.60, -1.0
     for threshold in thresholds:
         pred = (val_probs >= threshold).astype(int)
         tp = ((pred == 1) & (val_truth == 1)).sum()
