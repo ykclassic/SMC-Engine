@@ -23,11 +23,12 @@ def main() -> int:
     engine = SMCEngine(config)
     notifier = DiscordNotifier(config)
     journal = SignalJournal(config["journal"]["path"])
+    cooldown = int(config["notifications"].get("signal_cooldown_minutes", 30))
 
+    summary = {"scanned": 0, "candidates": 0, "signals_sent": 0, "duplicates_suppressed": 0, "rejected": 0, "data_errors": 0, "delivery_errors": 0}
     symbols = config["trading"]["symbols"]
     timeframes = config["market_data"]["timeframes"]
     limits = config["market_data"]["limits"]
-    summary = {"scanned": 0, "candidates": 0, "signals_sent": 0, "rejected": 0, "data_errors": 0, "delivery_errors": 0}
 
     for symbol in symbols:
         scan_id = str(uuid.uuid4())
@@ -50,8 +51,14 @@ def main() -> int:
                 logger.info("%s rejected: %s", symbol, diagnostic.get("reason"))
                 continue
 
-            summary["candidates"] += 1
             signal = replace(signal, symbol=symbol)
+            summary["candidates"] += 1
+            if journal.has_recent_signal(symbol, signal.side, cooldown):
+                summary["duplicates_suppressed"] += 1
+                journal.record_scan(scan_id, signal.timestamp, symbol, "SUPPRESSED", "DUPLICATE_COOLDOWN", diagnostic_payload)
+                logger.info("Suppressed duplicate %s signal for %s", signal.side, symbol)
+                continue
+
             journal.record_scan(scan_id, signal.timestamp, symbol, "SIGNAL", "VALIDATED", diagnostic_payload)
             embed = SignalFormatter.format_discord_embed(signal, config)
             delivered, status = notifier.send_signal(embed)
@@ -67,7 +74,6 @@ def main() -> int:
             logger.error("Scan failed for %s: %s", symbol, exc, exc_info=True)
 
     logger.info("SCAN_SUMMARY %s", json.dumps(summary, sort_keys=True))
-    # No-signal cycles are valid. Infrastructure/data/delivery failures are not.
     return 1 if summary["data_errors"] or summary["delivery_errors"] else 0
 
 
