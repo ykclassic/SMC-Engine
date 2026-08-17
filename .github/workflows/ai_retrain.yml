@@ -14,7 +14,9 @@ on:
       - "scripts/train_models.py"
       - "scripts/validate_model.py"
       - "core/**"
-      - "models/**"
+      - "models/**/*.py"
+      - "data/**"
+      - "utils/**"
       - "config/settings.yaml"
       - "config/constants.py"
       - "requirements-train.txt"
@@ -201,18 +203,6 @@ jobs:
           fi
 
       # ------------------------------------------------------------
-      # MODEL ARTIFACT CLEANLINESS
-      # ------------------------------------------------------------
-
-      - name: Remove Previous Training Artifacts
-        run: |
-          set -euo pipefail
-          rm -f \
-            models/weights/latest_gru.pth \
-            models/weights/feature_scaler.joblib \
-            models/weights/model_metadata.json
-
-      # ------------------------------------------------------------
       # TRAIN
       # ------------------------------------------------------------
 
@@ -327,10 +317,6 @@ jobs:
 
       - name: Validate Out-of-Sample Metrics
         id: validation
-        env:
-          EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
-          EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
-          EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
         run: |
           set -euo pipefail
           python scripts/validate_model.py
