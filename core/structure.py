@@ -22,9 +22,6 @@ class MarketStructureDetector:
         if len(frame) < window:
             return frame
 
-        # A pivot at p is only known at p + lookback. The pivot marker is
-        # retained for historical compatibility, but all actionable fields
-        # are written on the confirmation candle.
         for pivot in range(self.lookback, len(frame) - self.lookback):
             high_window = frame["high"].iloc[pivot - self.lookback : pivot + self.lookback + 1]
             low_window = frame["low"].iloc[pivot - self.lookback : pivot + self.lookback + 1]
@@ -72,13 +69,18 @@ class MarketStructureDetector:
         trend = None
 
         for idx, row in frame.iterrows():
-            # A newly confirmed swing becomes a level that can be broken only
-            # by a later closed candle. Do not treat the confirmation candle
-            # itself as a break of the newly confirmed level.
-            if row.get("high_confirmed") == 1 and pd.notna(row.get("confirmed_swing_high")):
+            high_confirmed = row.get("high_confirmed") == 1 and pd.notna(row.get("confirmed_swing_high"))
+            low_confirmed = row.get("low_confirmed") == 1 and pd.notna(row.get("confirmed_swing_low"))
+            if high_confirmed:
                 protected_high = float(row["confirmed_swing_high"])
-            if row.get("low_confirmed") == 1 and pd.notna(row.get("confirmed_swing_low")):
+            if low_confirmed:
                 protected_low = float(row["confirmed_swing_low"])
+
+            # A swing confirmation establishes a level; a BOS requires a
+            # subsequent closed candle to break that level.
+            if high_confirmed or low_confirmed:
+                frame.at[idx, "structure_bias"] = trend
+                continue
 
             close = float(row["close"])
             if protected_high is not None and close > protected_high:
