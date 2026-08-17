@@ -3,14 +3,19 @@ name: AI - Model Retraining Pipeline
 on:
   schedule:
     - cron: "0 0 * * 6"
+
   workflow_dispatch:
+
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - "scripts/train_models.py"
       - "scripts/validate_model.py"
       - "core/**"
+      - "models/**"
       - "config/settings.yaml"
+      - "config/constants.py"
       - "requirements-train.txt"
 
 permissions:
@@ -18,20 +23,34 @@ permissions:
 
 env:
   PYTHONPATH: .
+  PYTHONUNBUFFERED: "1"
 
 jobs:
   retrain-model:
     name: Train, Validate, and Version Model
+
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+
+    timeout-minutes: 30
+
     concurrency:
       group: ai-retraining
       cancel-in-progress: false
+
     steps:
+
+      # ------------------------------------------------------------
+      # CHECKOUT
+      # ------------------------------------------------------------
+
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # ------------------------------------------------------------
+      # PYTHON
+      # ------------------------------------------------------------
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -40,49 +59,343 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-train.txt
 
+      # ------------------------------------------------------------
+      # DEPENDENCIES
+      # ------------------------------------------------------------
+
       - name: Install Training Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --prefer-binary -r requirements-train.txt
+          python -m pip install --prefer-binary -r requirements-train.txt
+
+      # ------------------------------------------------------------
+      # RUNTIME DIAGNOSTICS
+      # ------------------------------------------------------------
+
+      - name: Runtime Diagnostics
+        run: |
+          echo "Python:"
+          python --version
+
+          echo ""
+          echo "Pip:"
+          python -m pip --version
+
+          echo ""
+          echo "Git commit:"
+          git rev-parse HEAD
+
+          echo ""
+          echo "Git branch:"
+          git branch --show-current
+
+          echo ""
+          echo "Repository status:"
+          git status --short
+
+      # ------------------------------------------------------------
+      # EXCHANGE SECRETS
+      # ------------------------------------------------------------
 
       - name: Validate Exchange Secrets
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
+        shell: bash
         run: |
-          for name in EXCHANGE_API_KEY EXCHANGE_API_SECRET EXCHANGE_PASSPHRASE; do
-            if [ -z "${!name}" ]; then echo "Missing $name"; exit 1; fi
+          set -euo pipefail
+
+          missing=0
+
+          for name in \
+            EXCHANGE_API_KEY \
+            EXCHANGE_API_SECRET \
+            EXCHANGE_PASSPHRASE
+          do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error title=Missing secret::$name is not configured"
+              missing=1
+            else
+              echo "$name is configured."
+            fi
           done
 
+          if [[ "$missing" -ne 0 ]]; then
+            exit 1
+          fi
+
+      # ------------------------------------------------------------
+      # MODEL ARTIFACT CLEANLINESS
+      # ------------------------------------------------------------
+
+      - name: Remove Previous Training Artifacts
+        run: |
+          rm -f models/weights/latest_gru.pth
+          rm -f models/weights/feature_scaler.joblib
+          rm -f models/weights/model_metadata.json
+
+      # ------------------------------------------------------------
+      # TRAIN
+      # ------------------------------------------------------------
+
       - name: Train on Real Market Data
+        id: training
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
-        run: python scripts/train_models.py
+        run: |
+          python scripts/train_models.py
+
+      # ------------------------------------------------------------
+      # VERIFY TRAINING OUTPUTS
+      # ------------------------------------------------------------
+
+      - name: Verify Training Artifacts
+        run: |
+          set -euo pipefail
+
+          required=(
+            "models/weights/latest_gru.pth"
+            "models/weights/feature_scaler.joblib"
+            "models/weights/model_metadata.json"
+          )
+
+          for path in "${required[@]}"; do
+            if [[ ! -f "$path" ]]; then
+              echo "::error title=Missing training artifact::$path"
+              exit 1
+            fi
+
+            echo "Verified: $path"
+            ls -lh "$path"
+          done
+
+      # ------------------------------------------------------------
+      # DISPLAY DATASET / MODEL METADATA
+      # ------------------------------------------------------------
+
+      - name: Inspect Training Metadata
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path(
+              "models/weights/model_metadata.json"
+          )
+
+          metadata = json.loads(
+              path.read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          print(
+              json.dumps(
+                  {
+                      "model_version": metadata.get(
+                          "model_version"
+                      ),
+                      "feature_version": metadata.get(
+                          "feature_version"
+                      ),
+                      "sequence_length": metadata.get(
+                          "sequence_length"
+                      ),
+                      "decision_threshold": metadata.get(
+                          "decision_threshold"
+                      ),
+                      "total_labeled_candidates": metadata.get(
+                          "total_labeled_candidates"
+                      ),
+                      "symbol_statistics": metadata.get(
+                          "symbol_statistics"
+                      ),
+                      "validation": metadata.get(
+                          "validation"
+                      ),
+                      "test": metadata.get(
+                          "test"
+                      ),
+                  },
+                  indent=2,
+              )
+          )
+          PY
+
+      # ------------------------------------------------------------
+      # MODEL VALIDATION
+      # ------------------------------------------------------------
 
       - name: Validate Out-of-Sample Metrics
+        id: validation
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
-        run: python scripts/validate_model.py
+        run: |
+          python scripts/validate_model.py
+
+      # ------------------------------------------------------------
+      # FINAL ARTIFACT INTEGRITY CHECK
+      # ------------------------------------------------------------
+
+      - name: Verify Final Model Integrity
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          base = Path("models/weights")
+
+          model = base / "latest_gru.pth"
+          scaler = base / "feature_scaler.joblib"
+          metadata_path = base / "model_metadata.json"
+
+          metadata = json.loads(
+              metadata_path.read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          def sha256(path: Path) -> str:
+              digest = hashlib.sha256()
+
+              with path.open("rb") as handle:
+                  for chunk in iter(
+                      lambda: handle.read(1024 * 1024),
+                      b"",
+                  ):
+                      digest.update(chunk)
+
+              return digest.hexdigest()
+
+          model_hash = sha256(model)
+          scaler_hash = sha256(scaler)
+
+          if model_hash != metadata.get(
+              "model_sha256"
+          ):
+              raise SystemExit(
+                  "Model SHA-256 does not match metadata"
+              )
+
+          if scaler_hash != metadata.get(
+              "scaler_sha256"
+          ):
+              raise SystemExit(
+                  "Scaler SHA-256 does not match metadata"
+              )
+
+          print(
+              "Model SHA-256 verified:"
+              f" {model_hash}"
+          )
+
+          print(
+              "Scaler SHA-256 verified:"
+              f" {scaler_hash}"
+          )
+          PY
+
+      # ------------------------------------------------------------
+      # ARTIFACT UPLOAD
+      # ------------------------------------------------------------
 
       - name: Upload Validated Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: validated-gru-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
           path: |
             models/weights/latest_gru.pth
             models/weights/feature_scaler.joblib
             models/weights/model_metadata.json
 
+      # ------------------------------------------------------------
+      # COMMIT ONLY AFTER ALL VALIDATION GATES PASS
+      # ------------------------------------------------------------
+
       - name: Commit Validated Model
         run: |
+          set -euo pipefail
+
           git config user.email "action@github.com"
           git config user.name "GitHub Action"
-          git add models/weights/latest_gru.pth models/weights/feature_scaler.joblib models/weights/model_metadata.json
-          git diff --cached --quiet && echo "No model changes." && exit 0
-          git commit -m "ci: promote validated SMC model"
+
+          git add \
+            models/weights/latest_gru.pth \
+            models/weights/feature_scaler.joblib \
+            models/weights/model_metadata.json
+
+          if git diff --cached --quiet; then
+            echo "No model changes."
+            exit 0
+          fi
+
+          MODEL_VERSION="$(
+            python - <<'PY'
+          import json
+
+          with open(
+              "models/weights/model_metadata.json",
+              encoding="utf-8",
+          ) as handle:
+              print(
+                  json.load(handle)[
+                      "model_version"
+                  ]
+              )
+          PY
+          )"
+
+          git commit \
+            -m "ci: promote validated SMC model ${MODEL_VERSION}"
+
           git push origin HEAD:main
+
+      # ------------------------------------------------------------
+      # FAILURE DIAGNOSTICS
+      # ------------------------------------------------------------
+
+      - name: Training Diagnostics
+        if: failure()
+        run: |
+          echo "Training pipeline failed."
+          echo ""
+          echo "Repository status:"
+          git status --short
+
+          echo ""
+          echo "Model directory:"
+          if [[ -d models/weights ]]; then
+            find models/weights -maxdepth 1 -type f -print
+          else
+            echo "models/weights does not exist."
+          fi
+
+      # ------------------------------------------------------------
+      # SUMMARY
+      # ------------------------------------------------------------
+
+      - name: Job Summary
+        if: always()
+        run: |
+          {
+            echo "## AI Retraining Pipeline"
+            echo ""
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Workflow: \`${GITHUB_RUN_ID}\`"
+            echo "- Status: \`${{ job.status }}\`"
+            echo ""
+            echo "A model is promoted only after:"
+            echo ""
+            echo "1. Real exchange data training"
+            echo "2. Training artifact verification"
+            echo "3. Out-of-sample validation"
+            echo "4. SHA-256 integrity verification"
+          } >> "$GITHUB_STEP_SUMMARY"
