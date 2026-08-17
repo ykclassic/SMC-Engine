@@ -17,6 +17,7 @@ on:
       - "config/settings.yaml"
       - "config/constants.py"
       - "requirements-train.txt"
+      - "tests/**"
 
 permissions:
   contents: write
@@ -28,9 +29,7 @@ env:
 jobs:
   retrain-model:
     name: Train, Validate, and Version Model
-
     runs-on: ubuntu-latest
-
     timeout-minutes: 30
 
     concurrency:
@@ -38,7 +37,6 @@ jobs:
       cancel-in-progress: false
 
     steps:
-
       # ------------------------------------------------------------
       # CHECKOUT
       # ------------------------------------------------------------
@@ -65,8 +63,23 @@ jobs:
 
       - name: Install Training Dependencies
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install --prefer-binary -r requirements-train.txt
+
+      # ------------------------------------------------------------
+      # STATIC / CONTRACT PREFLIGHT
+      # ------------------------------------------------------------
+
+      - name: Python Compile Check
+        run: |
+          set -euo pipefail
+          python -m compileall -q core scripts models data utils
+
+      - name: Training Event Contract Tests
+        run: |
+          set -euo pipefail
+          python -m pytest -q tests/test_training_events.py
 
       # ------------------------------------------------------------
       # RUNTIME DIAGNOSTICS
@@ -74,6 +87,8 @@ jobs:
 
       - name: Runtime Diagnostics
         run: |
+          set -euo pipefail
+
           echo "Python:"
           python --version
 
@@ -87,7 +102,7 @@ jobs:
 
           echo ""
           echo "Git branch:"
-          git branch --show-current
+          git branch --show-current || true
 
           echo ""
           echo "Repository status:"
@@ -131,9 +146,11 @@ jobs:
 
       - name: Remove Previous Training Artifacts
         run: |
-          rm -f models/weights/latest_gru.pth
-          rm -f models/weights/feature_scaler.joblib
-          rm -f models/weights/model_metadata.json
+          set -euo pipefail
+          rm -f \
+            models/weights/latest_gru.pth \
+            models/weights/feature_scaler.joblib \
+            models/weights/model_metadata.json
 
       # ------------------------------------------------------------
       # TRAIN
@@ -146,6 +163,7 @@ jobs:
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
         run: |
+          set -euo pipefail
           python scripts/train_models.py
 
       # ------------------------------------------------------------
@@ -163,8 +181,8 @@ jobs:
           )
 
           for path in "${required[@]}"; do
-            if [[ ! -f "$path" ]]; then
-              echo "::error title=Missing training artifact::$path"
+            if [[ ! -s "$path" ]]; then
+              echo "::error title=Missing or empty training artifact::$path"
               exit 1
             fi
 
@@ -173,52 +191,70 @@ jobs:
           done
 
       # ------------------------------------------------------------
-      # DISPLAY DATASET / MODEL METADATA
+      # DISPLAY AND VALIDATE MODEL METADATA
       # ------------------------------------------------------------
 
       - name: Inspect Training Metadata
         run: |
+          set -euo pipefail
+
           python - <<'PY'
           import json
           from pathlib import Path
 
-          path = Path(
-              "models/weights/model_metadata.json"
-          )
+          path = Path("models/weights/model_metadata.json")
+          metadata = json.loads(path.read_text(encoding="utf-8"))
 
-          metadata = json.loads(
-              path.read_text(
-                  encoding="utf-8"
+          required = {
+              "model_version",
+              "feature_version",
+              "feature_columns",
+              "sequence_length",
+              "decision_threshold",
+              "validation",
+              "test",
+              "trained_symbols",
+              "total_labeled_candidates",
+              "symbol_statistics",
+              "model_sha256",
+              "scaler_sha256",
+          }
+
+          missing = sorted(required.difference(metadata))
+          if missing:
+              raise SystemExit(
+                  "Model metadata is missing required fields: "
+                  + ", ".join(missing)
               )
-          )
+
+          threshold = float(metadata["decision_threshold"])
+          if not 0.0 < threshold < 1.0:
+              raise SystemExit(
+                  f"Invalid decision threshold: {threshold}"
+              )
+
+          sequence_length = int(metadata["sequence_length"])
+          if sequence_length <= 0:
+              raise SystemExit(
+                  f"Invalid sequence length: {sequence_length}"
+              )
+
+          if int(metadata["total_labeled_candidates"]) <= 0:
+              raise SystemExit("No labeled candidates were recorded")
 
           print(
               json.dumps(
                   {
-                      "model_version": metadata.get(
-                          "model_version"
-                      ),
-                      "feature_version": metadata.get(
-                          "feature_version"
-                      ),
-                      "sequence_length": metadata.get(
-                          "sequence_length"
-                      ),
-                      "decision_threshold": metadata.get(
-                          "decision_threshold"
-                      ),
-                      "total_labeled_candidates": metadata.get(
+                      "model_version": metadata["model_version"],
+                      "feature_version": metadata["feature_version"],
+                      "sequence_length": sequence_length,
+                      "decision_threshold": threshold,
+                      "total_labeled_candidates": metadata[
                           "total_labeled_candidates"
-                      ),
-                      "symbol_statistics": metadata.get(
-                          "symbol_statistics"
-                      ),
-                      "validation": metadata.get(
-                          "validation"
-                      ),
-                      "test": metadata.get(
-                          "test"
-                      ),
+                      ],
+                      "symbol_statistics": metadata["symbol_statistics"],
+                      "validation": metadata["validation"],
+                      "test": metadata["test"],
                   },
                   indent=2,
               )
@@ -236,6 +272,7 @@ jobs:
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
         run: |
+          set -euo pipefail
           python scripts/validate_model.py
 
       # ------------------------------------------------------------
@@ -244,61 +281,47 @@ jobs:
 
       - name: Verify Final Model Integrity
         run: |
+          set -euo pipefail
+
           python - <<'PY'
           import hashlib
           import json
           from pathlib import Path
 
           base = Path("models/weights")
-
           model = base / "latest_gru.pth"
           scaler = base / "feature_scaler.joblib"
           metadata_path = base / "model_metadata.json"
 
           metadata = json.loads(
-              metadata_path.read_text(
-                  encoding="utf-8"
-              )
+              metadata_path.read_text(encoding="utf-8")
           )
 
           def sha256(path: Path) -> str:
               digest = hashlib.sha256()
-
               with path.open("rb") as handle:
                   for chunk in iter(
                       lambda: handle.read(1024 * 1024),
                       b"",
                   ):
                       digest.update(chunk)
-
               return digest.hexdigest()
 
           model_hash = sha256(model)
           scaler_hash = sha256(scaler)
 
-          if model_hash != metadata.get(
-              "model_sha256"
-          ):
+          if model_hash != metadata["model_sha256"]:
               raise SystemExit(
                   "Model SHA-256 does not match metadata"
               )
 
-          if scaler_hash != metadata.get(
-              "scaler_sha256"
-          ):
+          if scaler_hash != metadata["scaler_sha256"]:
               raise SystemExit(
                   "Scaler SHA-256 does not match metadata"
               )
 
-          print(
-              "Model SHA-256 verified:"
-              f" {model_hash}"
-          )
-
-          print(
-              "Scaler SHA-256 verified:"
-              f" {scaler_hash}"
-          )
+          print(f"Model SHA-256 verified: {model_hash}")
+          print(f"Scaler SHA-256 verified: {scaler_hash}")
           PY
 
       # ------------------------------------------------------------
@@ -345,11 +368,7 @@ jobs:
               "models/weights/model_metadata.json",
               encoding="utf-8",
           ) as handle:
-              print(
-                  json.load(handle)[
-                      "model_version"
-                  ]
-              )
+              print(json.load(handle)["model_version"])
           PY
           )"
 
@@ -373,7 +392,7 @@ jobs:
           echo ""
           echo "Model directory:"
           if [[ -d models/weights ]]; then
-            find models/weights -maxdepth 1 -type f -print
+            find models/weights -maxdepth 1 -type f -printf '%f %s bytes\n'
           else
             echo "models/weights does not exist."
           fi
@@ -392,10 +411,14 @@ jobs:
             echo "- Workflow: \`${GITHUB_RUN_ID}\`"
             echo "- Status: \`${{ job.status }}\`"
             echo ""
-            echo "A model is promoted only after:"
+            echo "Promotion gates:"
             echo ""
-            echo "1. Real exchange data training"
-            echo "2. Training artifact verification"
-            echo "3. Out-of-sample validation"
-            echo "4. SHA-256 integrity verification"
+            echo "1. Python compilation"
+            echo "2. SMC training-event contract tests"
+            echo "3. Real exchange data training"
+            echo "4. Complete model/scaler/metadata artifact set"
+            echo "5. Metadata schema validation"
+            echo "6. Out-of-sample metric validation"
+            echo "7. SHA-256 model/scaler integrity verification"
+            echo "8. Git promotion"
           } >> "$GITHUB_STEP_SUMMARY"
