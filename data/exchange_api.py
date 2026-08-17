@@ -26,61 +26,202 @@ class ExchangeInterface:
             }
         )
         self.exchange.load_markets()
-        self.logger.info("Bitget interface initialized with %d markets.", len(self.exchange.markets))
+        self.logger.info(
+            "Bitget interface initialized with %d markets.",
+            len(self.exchange.markets),
+        )
 
     def _normalize(self, raw: list) -> pd.DataFrame:
         if not raw:
-            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-        numeric = ["open", "high", "low", "close", "volume"]
-        df[numeric] = df[numeric].apply(pd.to_numeric, errors="coerce")
-        return df.dropna(subset=numeric).drop_duplicates("timestamp").sort_values("timestamp").reset_index(drop=True)
+            return pd.DataFrame(
+                columns=[
+                    "timestamp",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                ]
+            )
 
-    def _drop_open_candle(self, df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+        df = pd.DataFrame(
+            raw,
+            columns=[
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+            ],
+        )
+        df["timestamp"] = pd.to_datetime(
+            df["timestamp"],
+            unit="ms",
+            utc=True,
+        )
+        numeric = ["open", "high", "low", "close", "volume"]
+        df[numeric] = df[numeric].apply(
+            pd.to_numeric,
+            errors="coerce",
+        )
+        return (
+            df.dropna(subset=numeric)
+            .drop_duplicates("timestamp")
+            .sort_values("timestamp")
+            .reset_index(drop=True)
+        )
+
+    def _drop_open_candle(
+        self,
+        df: pd.DataFrame,
+        timeframe: str,
+    ) -> pd.DataFrame:
         now = pd.Timestamp(datetime.now(timezone.utc))
         tf_ms = self.exchange.parse_timeframe(timeframe) * 1000
-        if not df.empty and (now.value // 1_000_000) < (df.iloc[-1]["timestamp"].value // 1_000_000) + tf_ms:
+
+        if (
+            not df.empty
+            and (now.value // 1_000_000)
+            < (df.iloc[-1]["timestamp"].value // 1_000_000) + tf_ms
+        ):
             return df.iloc[:-1].reset_index(drop=True)
+
         return df
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 200) -> pd.DataFrame:
+    def fetch_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int = 200,
+    ) -> pd.DataFrame:
         if symbol not in self.exchange.markets:
-            raise ValueError(f"Symbol {symbol} is not available on Bitget")
-        raw = self.exchange.fetch_ohlcv(symbol, timeframe, limit=min(limit, 1000))
-        df = self._drop_open_candle(self._normalize(raw), timeframe)
+            raise ValueError(
+                f"Symbol {symbol} is not available on Bitget"
+            )
+
+        raw = self.exchange.fetch_ohlcv(
+            symbol,
+            timeframe,
+            limit=min(limit, 1000),
+        )
+        df = self._drop_open_candle(
+            self._normalize(raw),
+            timeframe,
+        )
+
         if df.empty:
-            raise ValueError(f"No closed candles available for {symbol} {timeframe}")
+            raise ValueError(
+                f"No closed candles available for {symbol} {timeframe}"
+            )
+
         return df
 
-    def fetch_ohlcv_history(self, symbol: str, timeframe: str, candles: int = 5000) -> pd.DataFrame:
-        """Fetch a historical window by paging forward from its calculated start."""
+    def fetch_ohlcv_history(
+        self,
+        symbol: str,
+        timeframe: str,
+        candles: int = 5000,
+    ) -> pd.DataFrame:
+        """Fetch a historical window by forward pagination.
+
+        Exchanges may legitimately return fewer rows than the requested page
+        size without indicating that the requested historical window has been
+        exhausted. A short page therefore must not terminate pagination. The
+        loop stops only when the exchange returns no data, the requested candle
+        count is reached, or the cursor fails to advance.
+        """
+
         if symbol not in self.exchange.markets:
-            raise ValueError(f"Symbol {symbol} is not available on Bitget")
+            raise ValueError(
+                f"Symbol {symbol} is not available on Bitget"
+            )
+
         candles = max(1, int(candles))
         page_size = min(1000, candles)
         timeframe_ms = self.exchange.parse_timeframe(timeframe) * 1000
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        now_ms = int(
+            datetime.now(timezone.utc).timestamp() * 1000
+        )
         since = now_ms - (candles + 5) * timeframe_ms
+
         all_rows: list[list] = []
+        seen_cursors: set[int] = set()
+
         while len(all_rows) < candles:
-            batch = self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=page_size)
+            if since in seen_cursors:
+                self.logger.warning(
+                    "Bitget OHLCV pagination cursor repeated for %s %s at %s; stopping.",
+                    symbol,
+                    timeframe,
+                    since,
+                )
+                break
+
+            seen_cursors.add(since)
+
+            batch = self.exchange.fetch_ohlcv(
+                symbol,
+                timeframe,
+                since=since,
+                limit=page_size,
+            )
+
             if not batch:
                 break
+
             all_rows.extend(batch)
-            next_since = batch[-1][0] + timeframe_ms
+
+            last_timestamp = int(batch[-1][0])
+            next_since = last_timestamp + timeframe_ms
+
             if next_since <= since:
+                self.logger.warning(
+                    "Bitget OHLCV pagination did not advance for %s %s: since=%s next_since=%s; stopping.",
+                    symbol,
+                    timeframe,
+                    since,
+                    next_since,
+                )
                 break
+
             since = next_since
-            if len(batch) < page_size:
-                break
-        frame = self._drop_open_candle(self._normalize(all_rows), timeframe)
+
+            self.logger.debug(
+                "Fetched %d OHLCV rows for %s %s; accumulated=%d/%d.",
+                len(batch),
+                symbol,
+                timeframe,
+                len(all_rows),
+                candles,
+            )
+
+        frame = self._drop_open_candle(
+            self._normalize(all_rows),
+            timeframe,
+        )
+
         if len(frame) > candles:
             frame = frame.iloc[-candles:].reset_index(drop=True)
+
         if frame.empty:
-            raise ValueError(f"No historical closed candles available for {symbol} {timeframe}")
+            raise ValueError(
+                f"No historical closed candles available for {symbol} {timeframe}"
+            )
+
+        if len(frame) < candles:
+            self.logger.warning(
+                "Bitget returned %d closed candles for %s %s; requested %d.",
+                len(frame),
+                symbol,
+                timeframe,
+                candles,
+            )
+
         return frame
 
     def get_account_balance(self) -> float:
         balance = self.exchange.fetch_balance()
-        return float(balance.get("total", {}).get("USDT", 0.0))
+        return float(
+            balance.get("total", {}).get("USDT", 0.0)
+        )
