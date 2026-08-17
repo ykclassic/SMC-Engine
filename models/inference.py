@@ -19,6 +19,8 @@ class ModelInference:
         self.scaler_path = Path(model_config["scaler_path"])
         self.metadata_path = Path(model_config["metadata_path"])
         self.sequence_length = int(model_config.get("sequence_length", 32))
+        self.config_threshold = float(model_config.get("min_confidence", 0.60))
+        self.decision_threshold = self.config_threshold
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.logger = logging.getLogger("SMC-Inference")
         self.features = FeatureEngineer(self.sequence_length)
@@ -46,9 +48,10 @@ class ModelInference:
         state = torch.load(self.model_path, map_location=self.device, weights_only=True)
         self.model.load_state_dict(state)
         self.features.load_scaler(str(self.scaler_path))
+        self.decision_threshold = max(self.config_threshold, float(metadata.get("decision_threshold", self.config_threshold)))
         self.model.eval()
         self.available = True
-        self.logger.info("Loaded model version %s", metadata.get("model_version", "unknown"))
+        self.logger.info("Loaded model version %s with decision threshold %.3f", metadata.get("model_version", "unknown"), self.decision_threshold)
 
     def predict_confidence(self, df) -> float:
         if not self.available:
