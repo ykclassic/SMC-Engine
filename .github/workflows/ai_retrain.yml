@@ -2,47 +2,50 @@ name: AI - Model Retraining Pipeline
 
 on:
   schedule:
-    - cron: '0 0 * * 6'  # Every Saturday at 00:00 UTC
+    - cron: "0 0 * * 6"
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/train_models.py"
+      - "scripts/validate_model.py"
+      - "models/**"
+      - "core/**"
+      - "config/settings.yaml"
+      - "requirements-train.txt"
+
+permissions:
+  contents: write
+
+env:
+  PYTHONPATH: .
 
 jobs:
   retrain-model:
     name: Train, Validate, and Version Model
     runs-on: ubuntu-latest
-
+    timeout-minutes: 15
     concurrency:
       group: ai-retraining
-      cancel-in-progress: true
-
+      cancel-in-progress: false
     steps:
-      # -----------------------------
-      # 1. Checkout Repository
-      # -----------------------------
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # -----------------------------
-      # 2. Setup Python
-      # -----------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
-          cache: 'pip'
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-train.txt
 
-      # -----------------------------
-      # 3. Install Dependencies
-      # -----------------------------
-      - name: Install Dependencies
+      - name: Install Training Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-train.txt
 
-      # -----------------------------
-      # 4. Validate Required Secrets
-      # -----------------------------
       - name: Validate Secrets
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
@@ -50,83 +53,40 @@ jobs:
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          missing=0
+          for name in EXCHANGE_API_KEY EXCHANGE_API_SECRET EXCHANGE_PASSPHRASE DISCORD_WEBHOOK_URL; do
+            if [ -z "${!name}" ]; then echo "Missing $name"; exit 1; fi
+          done
 
-          if [ -z "$EXCHANGE_API_KEY" ]; then echo "Missing EXCHANGE_API_KEY"; missing=1; fi
-          if [ -z "$EXCHANGE_API_SECRET" ]; then echo "Missing EXCHANGE_API_SECRET"; missing=1; fi
-          if [ -z "$EXCHANGE_PASSPHRASE" ]; then echo "Missing EXCHANGE_PASSPHRASE"; missing=1; fi
-          if [ -z "$DISCORD_WEBHOOK_URL" ]; then echo "Missing DISCORD_WEBHOOK_URL"; missing=1; fi
-
-          if [ "$missing" -eq 1 ]; then
-            echo "❌ Missing required secrets. Aborting pipeline."
-            exit 1
-          fi
-
-          echo "✅ All required secrets are present."
-
-      # -----------------------------
-      # 5. Train Model
-      # -----------------------------
-      - name: Train Model
+      - name: Train on Real Market Data
         env:
-          PYTHONPATH: .
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          echo "🚀 Training model..."
-          python scripts/train_models.py
+        run: python scripts/train_models.py
 
-      # -----------------------------
-      # 6. Validate Model
-      # -----------------------------
-      - name: Validate Model
+      - name: Validate Out-of-Sample Metrics
         env:
-          PYTHONPATH: .
-        run: |
-          echo "📊 Validating model..."
-          python scripts/validate_model.py
+          EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
+          EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
+          EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python scripts/validate_model.py
 
-      # -----------------------------
-      # 7. Upload Artifact (always useful)
-      # -----------------------------
-      - name: Upload Model Artifact
-        if: success()
+      - name: Upload Validated Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: trained-model
-          path: models/weights/latest_gru.pth
+          name: validated-gru-${{ github.sha }}
+          path: |
+            models/weights/latest_gru.pth
+            models/weights/feature_scaler.joblib
+            models/weights/model_metadata.json
 
-      # -----------------------------
-      # 8. Commit & Push Model (with rebase fix)
-      # -----------------------------
-      - name: Commit and Push Model
-        if: success()
+      - name: Commit Validated Model
         run: |
-          if [ ! -f models/weights/latest_gru.pth ]; then
-            echo "❌ Model file not found. Skipping commit."
-            exit 1
-          fi
-
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-
-          git add models/weights/latest_gru.pth
-
-          # Prevent empty commit
-          git diff --cached --quiet && echo "No changes to commit." && exit 0
-
-          git commit -m "🤖 AI: Weekly Model Retrain ($(date +'%Y-%m-%d'))"
-
-          # --- CRITICAL FIX: avoid push rejection ---
-          git pull origin main --rebase
-
-          git push origin main
-
-      # -----------------------------
-      # 9. Completion Log
-      # -----------------------------
-      - name: Done
-        if: success()
-        run: echo "✅ AI retraining pipeline completed successfully."
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+          git add models/weights/latest_gru.pth models/weights/feature_scaler.joblib models/weights/model_metadata.json
+          git diff --cached --quiet && echo "No model changes." && exit 0
+          git commit -m "ci: promote validated SMC model"
+          git push origin HEAD:main
