@@ -29,11 +29,11 @@ def build_dataset(config: dict):
     zones = ZoneEngine(config)
     symbols = config["trading"]["symbols"]
     m15_tf = config["market_data"]["timeframes"]["m15"]
-    limit = max(1000, int(config["market_data"]["limits"]["m15"]))
+    limit = int(config["market_data"].get("training_history_candles", 5000))
     frames = []
 
     for symbol in symbols:
-        frame = exchange.fetch_ohlcv(symbol, m15_tf, limit=limit)
+        frame = exchange.fetch_ohlcv_history(symbol, m15_tf, candles=limit)
         processed = structure.analyze(frame)
         processed = zones.detect_fvg(processed)
         processed = zones.find_order_blocks(processed)
@@ -48,6 +48,7 @@ def build_dataset(config: dict):
 
 
 def build_labels(frame, config: dict) -> np.ndarray:
+    """Label only actual SMC candidates; no momentum-only synthetic targets."""
     fe = FeatureEngineer()
     atr = fe._atr(frame).to_numpy()
     rr = float(config["risk_management"]["default_tp_rr"])
@@ -58,12 +59,15 @@ def build_labels(frame, config: dict) -> np.ndarray:
     for i in range(len(frame) - horizon):
         if not np.isfinite(atr[i]) or atr[i] <= 0:
             continue
-        sweep = frame.iloc[i].get("liquidity_sweep")
-        bos = frame.iloc[i].get("bos")
-        direction = 1 if sweep == "BULLISH_SWEEP" or bos == "BULLISH_BOS" else -1 if sweep == "BEARISH_SWEEP" or bos == "BEARISH_BOS" else np.sign(frame["close"].iloc[i] - frame["close"].iloc[max(0, i - 5)])
+        row = frame.iloc[i]
+        sweep = row.get("liquidity_sweep")
+        bos = row.get("bos")
+        choch = row.get("choch")
+        direction = 1 if sweep == "BULLISH_SWEEP" or bos == "BULLISH_BOS" or choch == "BULLISH_CHOCH" else -1 if sweep == "BEARISH_SWEEP" or bos == "BEARISH_BOS" or choch == "BEARISH_CHOCH" else 0
         if direction == 0:
             continue
-        entry = float(frame["close"].iloc[i])
+
+        entry = float(row["close"])
         risk = float(atr[i]) * sl_mult
         target = entry + direction * risk * rr
         stop = entry - direction * risk
@@ -91,7 +95,7 @@ def sequence_dataset(frame, config: dict):
     valid = np.where(np.isfinite(labels))[0]
     valid = valid[valid >= sequence_length - 1]
     if len(valid) < 200:
-        raise RuntimeError(f"Not enough labeled samples: {len(valid)}")
+        raise RuntimeError(f"Not enough labeled SMC candidates: {len(valid)}")
     return raw_features, labels, valid
 
 
@@ -186,8 +190,11 @@ def train(config: dict) -> None:
             best_f1, best_threshold = f1, float(threshold)
 
     minimum_auc = float(config["model"].get("minimum_test_auc", 0.55))
-    if test_metrics["roc_auc"] < minimum_auc:
-        raise RuntimeError(f"Model rejected: test ROC-AUC {test_metrics['roc_auc']:.4f} < {minimum_auc:.4f}")
+    minimum_precision = float(config["model"].get("minimum_test_precision", 0.45))
+    if test_metrics["roc_auc"] < minimum_auc or test_metrics["precision"] < minimum_precision:
+        raise RuntimeError(
+            f"Model rejected: test ROC-AUC={test_metrics['roc_auc']:.4f} precision={test_metrics['precision']:.4f}"
+        )
 
     weights = Path(config["model"]["path"])
     scaler_path = Path(config["model"]["scaler_path"])
@@ -204,7 +211,8 @@ def train(config: dict) -> None:
         "validation": val_metrics,
         "test": test_metrics,
         "trained_symbols": config["trading"]["symbols"],
-        "label": "TP-before-SL with ATR-based 1.5R/2R outcome",
+        "training_candles_per_symbol": config["market_data"]["training_history_candles"],
+        "label": "TP-before-SL on actual SMC BOS/CHoCH/liquidity candidates",
     }
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print(json.dumps(metadata, indent=2))
