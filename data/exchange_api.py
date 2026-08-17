@@ -54,22 +54,22 @@ class ExchangeInterface:
         return df
 
     def fetch_ohlcv_history(self, symbol: str, timeframe: str, candles: int = 5000) -> pd.DataFrame:
-        """Paginate public OHLCV until the requested historical depth is reached."""
+        """Fetch a historical window by paging forward from its calculated start."""
         if symbol not in self.exchange.markets:
             raise ValueError(f"Symbol {symbol} is not available on Bitget")
         candles = max(1, int(candles))
         page_size = min(1000, candles)
         timeframe_ms = self.exchange.parse_timeframe(timeframe) * 1000
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        since = now_ms - (candles + 5) * timeframe_ms
         all_rows: list[list] = []
-        since = None
         while len(all_rows) < candles:
             batch = self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=page_size)
             if not batch:
                 break
             all_rows.extend(batch)
-            last_timestamp = batch[-1][0]
-            next_since = last_timestamp + timeframe_ms
-            if since is not None and next_since <= since:
+            next_since = batch[-1][0] + timeframe_ms
+            if next_since <= since:
                 break
             since = next_since
             if len(batch) < page_size:
