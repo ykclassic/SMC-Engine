@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -46,7 +47,7 @@ def validate() -> int:
             return 1
 
     try:
-        metadata = __import__("json").loads(
+        metadata = json.loads(
             metadata_path.read_text(encoding="utf-8")
         )
     except (OSError, ValueError) as exc:
@@ -98,7 +99,10 @@ def validate() -> int:
         return 1
 
     if getattr(scaler, "n_features_in_", len(FEATURE_COLUMNS)) != len(FEATURE_COLUMNS):
-        print("Validation failed: scaler feature count does not match feature schema")
+        print(
+            "Validation failed: scaler feature count does not match "
+            "feature schema"
+        )
         return 1
 
     model = SignalValidatorGRU(input_dim=len(FEATURE_COLUMNS))
