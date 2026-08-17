@@ -71,7 +71,7 @@ model:
   min_confidence: 0.60
   minimum_test_auc: 0.55
   minimum_test_precision: 0.45
-  expected_feature_version: smc-v2
+  expected_feature_version: smc-v3
 
 risk_management:
   default_tp_rr: 2.0
