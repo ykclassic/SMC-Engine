@@ -8,7 +8,7 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 
-FEATURE_VERSION = "smc-v2"
+FEATURE_VERSION = "smc-v3"
 FEATURE_COLUMNS = [
     "return_1",
     "atr_norm",
@@ -37,14 +37,11 @@ class FeatureEngineer:
     @staticmethod
     def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
         previous_close = df["close"].shift(1)
-        true_range = pd.concat(
-            [
-                df["high"] - df["low"],
-                (df["high"] - previous_close).abs(),
-                (df["low"] - previous_close).abs(),
-            ],
-            axis=1,
-        ).max(axis=1)
+        true_range = pd.concat([
+            df["high"] - df["low"],
+            (df["high"] - previous_close).abs(),
+            (df["low"] - previous_close).abs(),
+        ], axis=1).max(axis=1)
         return true_range.rolling(period, min_periods=period).mean()
 
     @staticmethod
@@ -57,7 +54,7 @@ class FeatureEngineer:
 
     def build_features(self, df: pd.DataFrame) -> pd.DataFrame:
         frame = df.copy().reset_index(drop=True)
-        for column in ["bos", "choch", "fvg", "order_block", "liquidity_sweep"]:
+        for column in ["bos", "choch", "fvg", "ob_event", "liquidity_sweep"]:
             if column not in frame:
                 frame[column] = None
 
@@ -78,11 +75,16 @@ class FeatureEngineer:
         features["bos_numeric"] = frame["bos"].map({"BULLISH_BOS": 1, "BEARISH_BOS": -1}).fillna(0)
         features["choch_numeric"] = frame["choch"].map({"BULLISH_CHOCH": 1, "BEARISH_CHOCH": -1}).fillna(0)
         features["fvg_numeric"] = frame["fvg"].map({"BULLISH_FVG": 1, "BEARISH_FVG": -1}).fillna(0)
-        features["ob_numeric"] = frame["order_block"].map({"BULLISH_OB": 1, "BEARISH_OB": -1}).fillna(0)
+        # An order block is only knowable after its BOS confirmation. The
+        # origin candle is therefore not used as a feature marker.
+        features["ob_numeric"] = frame["ob_event"].map({"BULLISH_OB": 1, "BEARISH_OB": -1}).fillna(0)
         features["sweep_numeric"] = frame["liquidity_sweep"].map({"BULLISH_SWEEP": 1, "BEARISH_SWEEP": -1}).fillna(0)
 
-        mid_zone = (frame.get("ob_top", pd.Series(np.nan, index=frame.index)) + frame.get("ob_bottom", pd.Series(np.nan, index=frame.index))) / 2
-        features["zone_distance"] = (frame["close"] - mid_zone) / frame["close"].replace(0, np.nan)
+        # Use only a zone that exists on the current confirmed candle. OB
+        # origin levels are deliberately excluded because they are discovered
+        # retrospectively when a later BOS occurs.
+        fvg_mid = (frame.get("fvg_top", pd.Series(np.nan, index=frame.index)) + frame.get("fvg_bottom", pd.Series(np.nan, index=frame.index))) / 2
+        features["zone_distance"] = (frame["close"] - fvg_mid) / frame["close"].replace(0, np.nan)
         features["rsi_norm"] = (self._rsi(frame) - 50) / 50
         features["momentum_norm"] = frame["close"].pct_change(5)
         features["hour_sin"] = np.sin(2 * np.pi * hour / 24)
