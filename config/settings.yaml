@@ -1,21 +1,90 @@
-# ------------------------------------------
-# Core SMC Logic Parameters
-# ------------------------------------------
+trading:
+  exchange: bitget
+  market_type: swap
+  symbols:
+    - BTC/USDT:USDT
+    - ETH/USDT:USDT
+  scan_timeframe: 15m
+  require_closed_candle: true
+
+market_data:
+  timeframes:
+    daily: 1d
+    h4: 4h
+    h1: 1h
+    m15: 15m
+  limits:
+    daily: 300
+    h4: 400
+    h1: 400
+    m15: 500
+  max_candle_age_minutes: 20
+  minimum_rows:
+    daily: 100
+    h4: 100
+    h1: 100
+    m15: 100
+
 market_structure:
-  lookback_period: 2          # Changed from 5 to 2. (Requires only 5 candles total to confirm structure).
-  structure_type: "body_close" 
-  confirmation_candles: 2     
+  lookback_period: 2
+  structure_type: body_close
+  confirmation_candles: 1
 
 liquidity:
-  eq_threshold: 0.0015        # Loosened slightly to catch more EQL/EQH zones
-  sweep_buffer: 0.0003        # Reduced so minor wicks still trigger sweep logic
-  search_depth: 30            
+  eq_threshold: 0.0015
+  sweep_buffer: 0.0003
+  search_depth: 50
 
 imbalance:
-  min_gap_size: 0.0005        # Reduced to catch standard imbalances, not just macro dumps
-  filter_mitigated: true      
+  min_gap_size: 0.0005
+  filter_mitigated: true
 
 order_blocks:
-  lookback_candles: 100       
-  require_fvg: false          # Changed to false. Allow strong BOS origin blocks even without immediate FVGs.
-  mitigation_threshold: 0.5   
+  lookback_candles: 50
+  require_fvg: false
+  mitigation_threshold: 0.5
+
+confluence:
+  minimum_score: 0.70
+  weights:
+    daily_bias: 0.20
+    h4_bias: 0.20
+    h1_setup: 0.20
+    m15_sweep: 0.20
+    m15_confirmation: 0.20
+
+model:
+  enabled: true
+  required: true
+  path: models/weights/latest_gru.pth
+  scaler_path: models/weights/feature_scaler.joblib
+  metadata_path: models/weights/model_metadata.json
+  sequence_length: 32
+  min_confidence: 0.60
+  expected_feature_version: smc-v2
+
+risk_management:
+  default_tp_rr: 2.0
+  atr_sl_multiplier: 1.5
+  max_spread_fraction: 0.001
+  risk_per_signal_percent: 1.0
+
+notifications:
+  timeout_seconds: 10
+  max_retries: 4
+  backoff_seconds: 2
+
+timeframes:
+  macro: 1d/4h
+  setup: 1h
+  micro: 15m
+
+discord:
+  color_long: 3066993
+  color_short: 15158332
+
+journal:
+  path: data/signal_journal.sqlite3
+
+logging:
+  level: INFO
