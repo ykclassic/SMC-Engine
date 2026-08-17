@@ -16,8 +16,8 @@ REQUIRED_SECRETS = {
 }
 
 
-def load_all_configs() -> dict:
-    """Load YAML configuration and required runtime secrets."""
+def load_all_configs(require_secrets: bool = True) -> dict:
+    """Load YAML configuration and optionally validate runtime secrets."""
     load_dotenv()
     logger = logging.getLogger("SMC-Config")
     config_path = Path(__file__).resolve().parents[1] / "config" / "settings.yaml"
@@ -36,17 +36,17 @@ def load_all_configs() -> dict:
     for env_name, config_key in REQUIRED_SECRETS.items():
         config[config_key] = os.getenv(env_name)
 
-    missing = [name for name in REQUIRED_SECRETS if not os.getenv(name)]
-    if missing:
-        raise EnvironmentError(f"Missing required environment variables: {', '.join(missing)}")
+    if require_secrets:
+        missing = [name for name in REQUIRED_SECRETS if not os.getenv(name)]
+        if missing:
+            raise EnvironmentError(f"Missing required environment variables: {', '.join(missing)}")
 
     symbols = config["trading"].get("symbols", [])
     if not symbols:
         raise ValueError("trading.symbols must contain at least one CCXT symbol")
-
     for timeframe_key in ("daily", "h4", "h1", "m15"):
         if timeframe_key not in config["market_data"]["timeframes"]:
             raise ValueError(f"market_data.timeframes.{timeframe_key} is required")
 
-    logger.info("Configuration and secrets validated successfully.")
+    logger.info("Configuration loaded successfully.")
     return config
