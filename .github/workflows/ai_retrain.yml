@@ -12,6 +12,7 @@ on:
       - "scripts/train_models.py"
       - "scripts/train_models_calibrated.py"
       - "scripts/train_models_calibration_diagnostic.py"
+      - "scripts/train_models_integrity.py"
       - "scripts/validate_model.py"
       - "core/**"
       - "models/**/*.py"
@@ -105,7 +106,7 @@ jobs:
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
         run: |
           set -euo pipefail
-          python scripts/train_models_calibration_diagnostic.py
+          python scripts/train_models_integrity.py
 
       - name: Verify Training Artifacts
         run: |
@@ -130,18 +131,24 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
+          from models.candidate_context import CONTEXT_COLUMNS, CONTEXT_VERSION
           path = Path("models/weights/model_metadata.json")
           metadata = json.loads(path.read_text(encoding="utf-8"))
           required = {
               "model_version", "feature_version", "feature_columns",
-              "sequence_length", "decision_threshold", "validation",
-              "test", "trained_symbols", "total_labeled_candidates",
-              "symbol_statistics", "model_sha256", "scaler_sha256",
-              "training_positive_weight", "threshold_search",
+              "candidate_context_version", "candidate_context_columns",
+              "sequence_length", "decision_threshold", "validation", "test",
+              "trained_symbols", "total_labeled_candidates", "symbol_statistics",
+              "model_sha256", "scaler_sha256", "training_positive_weight",
+              "threshold_search",
           }
           missing = sorted(required.difference(metadata))
           if missing:
               raise SystemExit("Model metadata is missing: " + ", ".join(missing))
+          if metadata["candidate_context_version"] != CONTEXT_VERSION:
+              raise SystemExit("Candidate context version mismatch")
+          if metadata["candidate_context_columns"] != list(CONTEXT_COLUMNS):
+              raise SystemExit("Candidate context schema mismatch")
           threshold = float(metadata["decision_threshold"])
           if not 0.0 < threshold < 1.0:
               raise SystemExit(f"Invalid decision threshold: {threshold}")
@@ -230,7 +237,9 @@ jobs:
             echo "- Workflow: \`${GITHUB_RUN_ID}\`"
             echo "- Status: \`${{ job.status }}\`"
             echo "- Training: class-weighted BCE"
-            echo "- Calibration: aggregate validation threshold + chronological stability diagnostics"
+            echo "- Labels: keyed by (candidate_index, direction)"
+            echo "- Candidate context: direction + event type"
+            echo "- Calibration: aggregate validation threshold + chronological diagnostics"
             echo "- Test set: frozen and untouched during threshold selection"
             echo "- Promotion: only after artifact, metric, and hash gates pass"
           } >> "$GITHUB_STEP_SUMMARY"
