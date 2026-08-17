@@ -226,6 +226,31 @@ def test_recovery_expands_beyond_previous_2048_window_ceiling():
     assert len(candidates) >= 850
 
 
+def test_recovery_controller_growth_crosses_previous_2048_boundary():
+    builder = SMCTrainingEventBuilder(
+        {
+            "training_events": {
+                "minimum_labeled_candidates_per_symbol": 300,
+                "recovery_continuation_window": 512,
+                "recovery_growth_factor": 2,
+                "recovery_max_window": 8192,
+                "recovery_max_candidates_per_event": 512,
+                "recovery_max_candidates_per_event_limit": 8192,
+            },
+            "model": {"label_horizon": 20},
+        }
+    )
+
+    next_window, next_max = builder._next_recovery_limits(
+        window=2048,
+        max_candidates_per_event=512,
+        frame_length=5000,
+    )
+
+    assert next_window == 4096
+    assert next_max == 1024
+
+
 def test_adaptive_recovery_growth_is_bounded_by_frame():
     frame = add_event_columns(make_frame(60))
     frame.loc[10, "bos"] = "BULLISH_BOS"
