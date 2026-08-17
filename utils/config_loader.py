@@ -8,41 +8,40 @@ import yaml
 from dotenv import load_dotenv
 
 
-REQUIRED_SECRETS = {
+EXCHANGE_SECRETS = {
     "EXCHANGE_API_KEY": "api_key",
     "EXCHANGE_API_SECRET": "api_secret",
     "EXCHANGE_PASSPHRASE": "passphrase",
-    "DISCORD_WEBHOOK_URL": "discord_webhook_url",
 }
 
+NOTIFICATION_SECRETS = {"DISCORD_WEBHOOK_URL": "discord_webhook_url"}
 
-def load_all_configs(require_secrets: bool = True) -> dict:
-    """Load YAML configuration and optionally validate runtime secrets."""
+
+def load_all_configs(require_secrets: bool = True, require_notifications: bool = True) -> dict:
     load_dotenv()
     logger = logging.getLogger("SMC-Config")
     config_path = Path(__file__).resolve().parents[1] / "config" / "settings.yaml"
     with config_path.open("r", encoding="utf-8") as file:
         config = yaml.safe_load(file) or {}
 
-    config.setdefault("trading", {})
-    config.setdefault("market_data", {})
+    for section in ("trading", "market_data", "model", "risk_management", "notifications", "journal"):
+        config.setdefault(section, {})
     config["market_data"].setdefault("timeframes", {})
     config["market_data"].setdefault("limits", {})
-    config.setdefault("model", {})
-    config.setdefault("risk_management", {})
-    config.setdefault("notifications", {})
-    config.setdefault("journal", {})
 
-    for env_name, config_key in REQUIRED_SECRETS.items():
-        config[config_key] = os.getenv(env_name)
+    for env_name, key in {**EXCHANGE_SECRETS, **NOTIFICATION_SECRETS}.items():
+        config[key] = os.getenv(env_name)
 
+    required = {}
     if require_secrets:
-        missing = [name for name in REQUIRED_SECRETS if not os.getenv(name)]
-        if missing:
-            raise EnvironmentError(f"Missing required environment variables: {', '.join(missing)}")
+        required.update(EXCHANGE_SECRETS)
+    if require_notifications:
+        required.update(NOTIFICATION_SECRETS)
+    missing = [name for name in required if not os.getenv(name)]
+    if missing:
+        raise EnvironmentError(f"Missing required environment variables: {', '.join(missing)}")
 
-    symbols = config["trading"].get("symbols", [])
-    if not symbols:
+    if not config["trading"].get("symbols"):
         raise ValueError("trading.symbols must contain at least one CCXT symbol")
     for timeframe_key in ("daily", "h4", "h1", "m15"):
         if timeframe_key not in config["market_data"]["timeframes"]:
