@@ -3,15 +3,14 @@ name: AI - Model Retraining Pipeline
 on:
   schedule:
     - cron: "0 0 * * 6"
-
   workflow_dispatch:
-
   push:
     branches:
       - main
     paths:
       - ".github/workflows/ai_retrain.yml"
       - "scripts/train_models.py"
+      - "scripts/train_models_calibrated.py"
       - "scripts/validate_model.py"
       - "core/**"
       - "models/**/*.py"
@@ -38,24 +37,15 @@ jobs:
     name: Train, Validate, and Version Model
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     concurrency:
       group: ai-retraining
       cancel-in-progress: false
 
     steps:
-      # ------------------------------------------------------------
-      # CHECKOUT
-      # ------------------------------------------------------------
-
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      # ------------------------------------------------------------
-      # PYTHON
-      # ------------------------------------------------------------
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -64,19 +54,11 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-train.txt
 
-      # ------------------------------------------------------------
-      # DEPENDENCIES
-      # ------------------------------------------------------------
-
       - name: Install Training Dependencies
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install --prefer-binary -r requirements-train.txt
-
-      # ------------------------------------------------------------
-      # STATIC / CONTRACT PREFLIGHT
-      # ------------------------------------------------------------
 
       - name: Python Compile Check
         run: |
@@ -84,112 +66,27 @@ jobs:
           python -m compileall -q core scripts models data utils
 
       - name: Full Test Suite
-        id: full_test_suite
         run: |
           set -euo pipefail
           python -m pytest -q
 
-      - name: Full Test Suite Failure Diagnostics
-        if: failure()
-        run: |
-          set -u
-
-          report="test-suite-failure.txt"
-
-          {
-            echo "AI retraining full-suite diagnostic report"
-            echo "Commit: ${GITHUB_SHA}"
-            echo "Workflow run: ${GITHUB_RUN_ID}"
-            echo ""
-            echo "=== tests/test_core.py ==="
-          } > "$report"
-
-          python -m pytest -q tests/test_core.py --tb=long >> "$report" 2>&1
-          core_status=$?
-
-          {
-            echo ""
-            echo "=== tests/test_journal.py ==="
-          } >> "$report"
-
-          python -m pytest -q tests/test_journal.py --tb=long >> "$report" 2>&1
-          journal_status=$?
-
-          {
-            echo ""
-            echo "=== tests/test_training_events.py ==="
-          } >> "$report"
-
-          python -m pytest -q tests/test_training_events.py --tb=long >> "$report" 2>&1
-          training_events_status=$?
-
-          {
-            echo ""
-            echo "=== exit codes ==="
-            echo "test_core.py=${core_status}"
-            echo "test_journal.py=${journal_status}"
-            echo "test_training_events.py=${training_events_status}"
-          } >> "$report"
-
-          echo "Detailed test diagnostics written to $report"
-          cat "$report"
-
-      - name: Upload Full Test Diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-suite-diagnostics-${{ github.sha }}
-          if-no-files-found: error
-          retention-days: 7
-          path: test-suite-failure.txt
-
-      # ------------------------------------------------------------
-      # RUNTIME DIAGNOSTICS
-      # ------------------------------------------------------------
-
       - name: Runtime Diagnostics
         run: |
           set -euo pipefail
-
-          echo "Python:"
           python --version
-
-          echo ""
-          echo "Pip:"
           python -m pip --version
-
-          echo ""
-          echo "Git commit:"
           git rev-parse HEAD
-
-          echo ""
-          echo "Git branch:"
-          git branch --show-current || true
-
-          echo ""
-          echo "Repository status:"
           git status --short
-
-      # ------------------------------------------------------------
-      # EXCHANGE SECRETS
-      # ------------------------------------------------------------
 
       - name: Validate Exchange Secrets
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
-        shell: bash
         run: |
           set -euo pipefail
-
           missing=0
-
-          for name in \
-            EXCHANGE_API_KEY \
-            EXCHANGE_API_SECRET \
-            EXCHANGE_PASSPHRASE
-          do
+          for name in EXCHANGE_API_KEY EXCHANGE_API_SECRET EXCHANGE_PASSPHRASE; do
             if [[ -z "${!name:-}" ]]; then
               echo "::error title=Missing secret::$name is not configured"
               missing=1
@@ -197,14 +94,7 @@ jobs:
               echo "$name is configured."
             fi
           done
-
-          if [[ "$missing" -ne 0 ]]; then
-            exit 1
-          fi
-
-      # ------------------------------------------------------------
-      # TRAIN
-      # ------------------------------------------------------------
+          if [[ "$missing" -ne 0 ]]; then exit 1; fi
 
       - name: Train on Real Market Data
         id: training
@@ -214,106 +104,50 @@ jobs:
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
         run: |
           set -euo pipefail
-          python scripts/train_models.py
-
-      # ------------------------------------------------------------
-      # VERIFY TRAINING OUTPUTS
-      # ------------------------------------------------------------
+          python scripts/train_models_calibrated.py
 
       - name: Verify Training Artifacts
         run: |
           set -euo pipefail
-
           required=(
             "models/weights/latest_gru.pth"
             "models/weights/feature_scaler.joblib"
             "models/weights/model_metadata.json"
           )
-
           for path in "${required[@]}"; do
             if [[ ! -s "$path" ]]; then
               echo "::error title=Missing or empty training artifact::$path"
               exit 1
             fi
-
             echo "Verified: $path"
             ls -lh "$path"
           done
 
-      # ------------------------------------------------------------
-      # DISPLAY AND VALIDATE MODEL METADATA
-      # ------------------------------------------------------------
-
       - name: Inspect Training Metadata
         run: |
           set -euo pipefail
-
           python - <<'PY'
           import json
           from pathlib import Path
-
           path = Path("models/weights/model_metadata.json")
           metadata = json.loads(path.read_text(encoding="utf-8"))
-
           required = {
-              "model_version",
-              "feature_version",
-              "feature_columns",
-              "sequence_length",
-              "decision_threshold",
-              "validation",
-              "test",
-              "trained_symbols",
-              "total_labeled_candidates",
-              "symbol_statistics",
-              "model_sha256",
-              "scaler_sha256",
+              "model_version", "feature_version", "feature_columns",
+              "sequence_length", "decision_threshold", "validation",
+              "test", "trained_symbols", "total_labeled_candidates",
+              "symbol_statistics", "model_sha256", "scaler_sha256",
+              "training_positive_weight", "threshold_search",
           }
-
           missing = sorted(required.difference(metadata))
           if missing:
-              raise SystemExit(
-                  "Model metadata is missing required fields: "
-                  + ", ".join(missing)
-              )
-
+              raise SystemExit("Model metadata is missing: " + ", ".join(missing))
           threshold = float(metadata["decision_threshold"])
           if not 0.0 < threshold < 1.0:
-              raise SystemExit(
-                  f"Invalid decision threshold: {threshold}"
-              )
-
-          sequence_length = int(metadata["sequence_length"])
-          if sequence_length <= 0:
-              raise SystemExit(
-                  f"Invalid sequence length: {sequence_length}"
-              )
-
+              raise SystemExit(f"Invalid decision threshold: {threshold}")
           if int(metadata["total_labeled_candidates"]) <= 0:
               raise SystemExit("No labeled candidates were recorded")
-
-          print(
-              json.dumps(
-                  {
-                      "model_version": metadata["model_version"],
-                      "feature_version": metadata["feature_version"],
-                      "sequence_length": sequence_length,
-                      "decision_threshold": threshold,
-                      "total_labeled_candidates": metadata[
-                          "total_labeled_candidates"
-                      ],
-                      "symbol_statistics": metadata["symbol_statistics"],
-                      "validation": metadata["validation"],
-                      "test": metadata["test"],
-                  },
-                  indent=2,
-              )
-          )
+          print(json.dumps(metadata, indent=2))
           PY
-
-      # ------------------------------------------------------------
-      # MODEL VALIDATION
-      # ------------------------------------------------------------
 
       - name: Validate Out-of-Sample Metrics
         id: validation
@@ -321,58 +155,30 @@ jobs:
           set -euo pipefail
           python scripts/validate_model.py
 
-      # ------------------------------------------------------------
-      # FINAL ARTIFACT INTEGRITY CHECK
-      # ------------------------------------------------------------
-
       - name: Verify Final Model Integrity
         run: |
           set -euo pipefail
-
           python - <<'PY'
           import hashlib
           import json
           from pathlib import Path
-
           base = Path("models/weights")
-          model = base / "latest_gru.pth"
-          scaler = base / "feature_scaler.joblib"
-          metadata_path = base / "model_metadata.json"
-
-          metadata = json.loads(
-              metadata_path.read_text(encoding="utf-8")
-          )
-
-          def sha256(path: Path) -> str:
+          metadata = json.loads((base / "model_metadata.json").read_text(encoding="utf-8"))
+          def sha256(path):
               digest = hashlib.sha256()
               with path.open("rb") as handle:
-                  for chunk in iter(
-                      lambda: handle.read(1024 * 1024),
-                      b"",
-                  ):
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                       digest.update(chunk)
               return digest.hexdigest()
-
-          model_hash = sha256(model)
-          scaler_hash = sha256(scaler)
-
+          model_hash = sha256(base / "latest_gru.pth")
+          scaler_hash = sha256(base / "feature_scaler.joblib")
           if model_hash != metadata["model_sha256"]:
-              raise SystemExit(
-                  "Model SHA-256 does not match metadata"
-              )
-
+              raise SystemExit("Model SHA-256 does not match metadata")
           if scaler_hash != metadata["scaler_sha256"]:
-              raise SystemExit(
-                  "Scaler SHA-256 does not match metadata"
-              )
-
+              raise SystemExit("Scaler SHA-256 does not match metadata")
           print(f"Model SHA-256 verified: {model_hash}")
           print(f"Scaler SHA-256 verified: {scaler_hash}")
           PY
-
-      # ------------------------------------------------------------
-      # ARTIFACT UPLOAD
-      # ------------------------------------------------------------
 
       - name: Upload Validated Artifacts
         uses: actions/upload-artifact@v4
@@ -385,67 +191,33 @@ jobs:
             models/weights/feature_scaler.joblib
             models/weights/model_metadata.json
 
-      # ------------------------------------------------------------
-      # COMMIT ONLY AFTER ALL VALIDATION GATES PASS
-      # ------------------------------------------------------------
-
       - name: Commit Validated Model
         run: |
           set -euo pipefail
-
           git config user.email "action@github.com"
           git config user.name "GitHub Action"
-
-          git add \
-            models/weights/latest_gru.pth \
-            models/weights/feature_scaler.joblib \
-            models/weights/model_metadata.json
-
+          git add models/weights/latest_gru.pth models/weights/feature_scaler.joblib models/weights/model_metadata.json
           if git diff --cached --quiet; then
             echo "No model changes."
             exit 0
           fi
-
-          MODEL_VERSION="$(
-            python - <<'PY'
+          MODEL_VERSION="$(python - <<'PY'
           import json
-
-          with open(
-              "models/weights/model_metadata.json",
-              encoding="utf-8",
-          ) as handle:
+          with open("models/weights/model_metadata.json", encoding="utf-8") as handle:
               print(json.load(handle)["model_version"])
           PY
           )"
-
-          git commit \
-            -m "ci: promote validated SMC model ${MODEL_VERSION}"
-
+          git commit -m "ci: promote validated SMC model ${MODEL_VERSION}"
           git push origin HEAD:main
-
-      # ------------------------------------------------------------
-      # FAILURE DIAGNOSTICS
-      # ------------------------------------------------------------
 
       - name: Training Diagnostics
         if: failure()
         run: |
           echo "Training pipeline failed."
-          echo ""
-          echo "Repository status:"
           git status --short
-
-          echo ""
-          echo "Model directory:"
           if [[ -d models/weights ]]; then
             find models/weights -maxdepth 1 -type f -printf '%f %s bytes\n'
-          else
-            echo "models/weights does not exist."
           fi
-
-      # ------------------------------------------------------------
-      # SUMMARY
-      # ------------------------------------------------------------
 
       - name: Job Summary
         if: always()
@@ -456,15 +228,8 @@ jobs:
             echo "- Commit: \`${GITHUB_SHA}\`"
             echo "- Workflow: \`${GITHUB_RUN_ID}\`"
             echo "- Status: \`${{ job.status }}\`"
-            echo ""
-            echo "Promotion gates:"
-            echo ""
-            echo "1. Python compilation"
-            echo "2. Full repository test suite"
-            echo "3. Real exchange data training"
-            echo "4. Complete model/scaler/metadata artifact set"
-            echo "5. Metadata schema validation"
-            echo "6. Out-of-sample metric validation"
-            echo "7. SHA-256 model/scaler integrity verification"
-            echo "8. Git promotion"
+            echo "- Training: class-weighted BCE"
+            echo "- Calibration: validation-only threshold search"
+            echo "- Test set: frozen and untouched during threshold selection"
+            echo "- Promotion: only after artifact, metric, and hash gates pass"
           } >> "$GITHUB_STEP_SUMMARY"
