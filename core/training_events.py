@@ -42,11 +42,18 @@ EVENT_COLUMNS = (
 class SMCTrainingEventBuilder:
     """Build causal SMC candidates for supervised model training.
 
-    Normal generation preserves the configured continuation window, spacing,
-    and per-event limits. Production recovery progressively relaxes spacing
-    and expands the causal window via `expand_capacity()`, strictly controlled
-    by an external loop validating true TP/SL labeled capacity, but never invents
-    future observations or lowers the downstream labeled-candidate quality gate.
+    Recovery has two layers:
+
+    1. ``build()`` performs structural recovery when the configured recovery
+       target cannot be reached with the current candidate capacity. This keeps
+       the builder's recovery state deterministic and makes sparse-data behavior
+       observable without weakening the label-quality gate.
+    2. ``train_models.py`` remains the authoritative label-aware controller. It
+       validates actual TP/SL labels and calls ``expand_capacity()`` when the
+       hard labeled-candidate minimum is still unmet.
+
+    Every recovery limit is bounded by the available frame length, so recovery
+    can never request observations beyond the causal data that exists.
     """
 
     def __init__(self, config: dict) -> None:
@@ -111,7 +118,8 @@ class SMCTrainingEventBuilder:
             int(training.get("recovery_candidate_buffer", 64)),
         )
 
-        # External recovery state
+        # Recovery state is shared between structural pre-recovery in build()
+        # and label-aware recovery driven by train_models.py.
         self.recovery_mode = False
         self.recovery_iterations = 0
         self.recovery_capacity_limited = False
@@ -119,6 +127,7 @@ class SMCTrainingEventBuilder:
         self.current_window = self.window
         self.current_spacing = self.min_spacing
         self.current_max_candidates_per_event = self.max_candidates_per_event
+        self._last_frame_length = 0
 
         self.last_build_stats: dict = {}
         self.last_label_stats: dict = {}
@@ -244,7 +253,7 @@ class SMCTrainingEventBuilder:
         return candidates
 
     def _recovery_target_candidates(self) -> int:
-        """Return the candidate target needed to protect the label floor."""
+        """Return the raw-candidate target used to protect the label floor."""
 
         return (
             self.minimum_labeled_candidates
@@ -260,51 +269,98 @@ class SMCTrainingEventBuilder:
             and int(labeled_count) < self.minimum_labeled_candidates
         )
 
+    @staticmethod
+    def _frame_window_limit(frame_length: int) -> int:
+        """Return the largest valid continuation distance for a frame."""
+
+        return max(0, int(frame_length) - 1)
+
+    @staticmethod
+    def _frame_candidate_limit(frame_length: int) -> int:
+        """Return the largest possible per-event candidate count."""
+
+        return max(0, int(frame_length))
+
     def _next_recovery_limits(
         self,
         window: int,
         max_candidates_per_event: int,
+        frame_length: int | None = None,
     ) -> tuple[int, int]:
-        """Grow recovery limits within maximum structural bounds."""
+        """Grow recovery limits while respecting configured and frame bounds.
+
+        ``frame_length`` is optional for backward compatibility. When omitted,
+        the most recently built frame length is used. Passing it explicitly is
+        preferred for deterministic controller tests and new callers.
+        """
+
+        effective_frame_length = (
+            self._last_frame_length
+            if frame_length is None
+            else max(0, int(frame_length))
+        )
+
+        frame_window_limit = self._frame_window_limit(effective_frame_length)
+        frame_candidate_limit = self._frame_candidate_limit(effective_frame_length)
 
         next_window = min(
             self.recovery_max_window,
+            frame_window_limit,
             max(
-                window + 1,
-                window * self.recovery_growth_factor,
+                int(window) + 1,
+                int(window) * self.recovery_growth_factor,
             ),
         )
         next_max = min(
             self.recovery_max_candidates_per_event_limit,
+            frame_candidate_limit,
             max(
-                max_candidates_per_event + 1,
-                max_candidates_per_event * self.recovery_growth_factor,
+                int(max_candidates_per_event) + 1,
+                int(max_candidates_per_event) * self.recovery_growth_factor,
             ),
         )
-        return next_window, next_max
 
-    def expand_capacity(self) -> None:
-        """
-        Statefully expand the builder's candidate retrieval limits.
-        Called when downstream validators (TP/SL rules) discard too many samples.
-        """
+        return max(0, next_window), max(0, next_max)
+
+    def expand_capacity(self, frame_length: int | None = None) -> None:
+        """Expand candidate capacity for structural or label-aware recovery."""
+
         if not self.recovery_enabled:
             return
 
-        self.recovery_iterations += 1
+        effective_frame_length = (
+            self._last_frame_length
+            if frame_length is None
+            else max(0, int(frame_length))
+        )
 
-        if not self.recovery_mode:
-            self.recovery_mode = True
+        if effective_frame_length:
+            self._last_frame_length = effective_frame_length
+
+        frame_window_limit = self._frame_window_limit(self._last_frame_length)
+        frame_candidate_limit = self._frame_candidate_limit(self._last_frame_length)
+
+        self.recovery_iterations += 1
+        self.recovery_mode = True
+
+        if self.recovery_iterations == 1:
             self.current_spacing = 1
-            self.current_window = max(self.window, self.recovery_window)
-            self.current_max_candidates_per_event = max(
-                self.max_candidates_per_event,
-                self.recovery_max_candidates_per_event,
+            self.current_window = min(
+                max(self.window, self.recovery_window),
+                frame_window_limit,
+            )
+            self.current_max_candidates_per_event = min(
+                max(
+                    self.max_candidates_per_event,
+                    self.recovery_max_candidates_per_event,
+                ),
+                frame_candidate_limit,
             )
         else:
             next_window, next_max = self._next_recovery_limits(
                 self.current_window,
                 self.current_max_candidates_per_event,
+                frame_length=self._last_frame_length,
             )
 
             if (
@@ -316,8 +372,31 @@ class SMCTrainingEventBuilder:
             self.current_window = next_window
             self.current_max_candidates_per_event = next_max
 
+        if (
+            self.current_window >= frame_window_limit
+            and self.current_max_candidates_per_event >= frame_candidate_limit
+            and self._last_frame_length > 0
+        ):
+            self.recovery_capacity_limited = True
+
+    def _build_candidates_for_current_state(
+        self,
+        frame: pd.DataFrame,
+        event_indices: list[tuple[int, str, int]],
+    ) -> tuple[list[TrainingCandidate], pd.DataFrame]:
+        """Emit and canonicalize candidates for the current recovery state."""
+
+        candidates = self._emit_candidates(
+            frame,
+            event_indices,
+            self.current_window,
+            self.current_spacing,
+            self.current_max_candidates_per_event,
+        )
+        return candidates, self._unique_candidates(candidates)
+
     def build(self, frame: pd.DataFrame) -> pd.DataFrame:
-        """Build causal event/continuation candidates using the current state's limits."""
+        """Build causal candidates, using structural recovery when enabled."""
 
         columns = [
             "candidate_index",
@@ -325,6 +404,8 @@ class SMCTrainingEventBuilder:
             "event_type",
             "distance_from_event",
         ]
+
+        self._last_frame_length = len(frame)
 
         if frame.empty:
             self.last_build_stats = {
@@ -370,22 +451,47 @@ class SMCTrainingEventBuilder:
                 "target_candidates": int(target_candidates),
                 "recovery_mode": self.recovery_mode,
                 "recovery_enabled": self.recovery_enabled,
-                "recovery_window": self.current_window,
-                "recovery_spacing": self.current_spacing,
-                "recovery_max_candidates_per_event": self.current_max_candidates_per_event,
+                "recovery_window": int(self.current_window),
+                "recovery_spacing": int(self.current_spacing),
+                "recovery_max_candidates_per_event": int(self.current_max_candidates_per_event),
                 "recovery_iterations": self.recovery_iterations,
                 "recovery_capacity_limited": self.recovery_capacity_limited,
             }
             return pd.DataFrame(columns=columns)
 
-        candidates = self._emit_candidates(
+        # Structural recovery establishes the candidate budget. The downstream
+        # train_models.py loop still performs the authoritative label-aware
+        # recovery after TP/SL labeling.
+        if self.recovery_enabled and not self.recovery_mode:
+            self.expand_capacity(frame_length=len(frame))
+
+        candidates, result = self._build_candidates_for_current_state(
             frame,
             event_indices,
-            self.current_window,
-            self.current_spacing,
-            self.current_max_candidates_per_event,
         )
-        result = self._unique_candidates(candidates)
+
+        while (
+            self.recovery_enabled
+            and len(result) < target_candidates
+            and not self.recovery_capacity_limited
+        ):
+            previous_signature = (
+                self.current_window,
+                self.current_max_candidates_per_event,
+            )
+            self.expand_capacity(frame_length=len(frame))
+            current_signature = (
+                self.current_window,
+                self.current_max_candidates_per_event,
+            )
+
+            if current_signature == previous_signature:
+                break
+
+            candidates, result = self._build_candidates_for_current_state(
+                frame,
+                event_indices,
+            )
 
         raw_candidate_count = len(candidates)
 
