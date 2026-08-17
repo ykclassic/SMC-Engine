@@ -48,20 +48,16 @@ class SMCTrainingEventBuilder:
     event.
 
     Recovery mode is opt-in through the explicit
-    ``minimum_labeled_candidates_per_symbol`` training configuration. This is
-    important because small/unit-test configurations should retain the normal
-    configured window and candidate limits rather than unexpectedly widening
-    them because the production training threshold is not present.
+    ``minimum_labeled_candidates_per_symbol`` training configuration. Normal
+    callers and unit tests therefore retain their configured event window,
+    spacing, and per-event limits.
 
-    When recovery is enabled and the configured event window cannot supply
-    enough distinct observations for the downstream training quality gate,
-    the builder widens the continuation window and spacing constraints rather
-    than fabricating data or lowering the quality gate. Recovery remains
-    causal and uses only real candles.
-
-    Multiple SMC events may resolve to the same candle/direction. Such
-    observations are deduplicated because the GRU input is identical for that
-    candle/side.
+    Production recovery is intentionally broader than normal candidate
+    generation. Sparse SMC events are a data-coverage problem, not a reason to
+    lower the downstream quality gate. Recovery therefore uses real candles,
+    keeps the direction/event provenance, removes duplicate candle/direction
+    observations, and expands the causal continuation window and per-event
+    candidate budget until the downstream sequence/label losses are covered.
     """
 
     def __init__(self, config: dict) -> None:
@@ -98,6 +94,32 @@ class SMCTrainingEventBuilder:
             0,
             int(model.get("label_horizon", 20)),
         )
+        self.sequence_length = max(
+            1,
+            int(model.get("sequence_length", 32)),
+        )
+
+        # These are deliberately configurable so production data coverage can
+        # be increased without changing the normal candidate contract.
+        self.recovery_window = max(
+            self.window,
+            int(
+                training.get(
+                    "recovery_continuation_window",
+                    512,
+                )
+            ),
+        )
+        self.recovery_max_candidates_per_event = max(
+            self.max_candidates_per_event,
+            int(
+                training.get(
+                    "recovery_max_candidates_per_event",
+                    512,
+                )
+            ),
+        )
+
         self.last_build_stats: dict = {}
         self.last_label_stats: dict = {}
 
@@ -278,11 +300,13 @@ class SMCTrainingEventBuilder:
             }
             return pd.DataFrame(columns=columns)
 
-        # Recovery is deliberately opt-in. Production configuration explicitly
-        # defines the labeled-sample quality gate; lightweight callers and unit
-        # tests that omit it retain the normal configured candidate contract.
+        # Candidates lost by sequence warm-up and forward-label horizon cannot
+        # become usable labels. Include both losses in the recovery target.
         target_candidates = (
-            self.minimum_labeled_candidates + self.label_horizon
+            self.minimum_labeled_candidates
+            + self.label_horizon
+            + self.sequence_length
+            - 1
             if self.recovery_enabled
             else 0
         )
@@ -303,25 +327,8 @@ class SMCTrainingEventBuilder:
         if self.recovery_enabled and len(result) < target_candidates:
             recovery_mode = True
             recovery_spacing = 1
-            recovery_window = max(
-                self.window,
-                min(
-                    64,
-                    max(
-                        self.window + self.label_horizon,
-                        32,
-                    ),
-                ),
-            )
-            recovery_max = max(
-                self.max_candidates_per_event,
-                int(
-                    np.ceil(
-                        target_candidates / len(event_indices)
-                    )
-                )
-                + 2,
-            )
+            recovery_window = self.recovery_window
+            recovery_max = self.recovery_max_candidates_per_event
 
             candidates = self._emit_candidates(
                 frame,
