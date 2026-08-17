@@ -132,6 +132,30 @@ def test_training_builder_expands_candidates_from_multiple_event_origins():
     assert len(candidates) >= 4
 
 
+def test_training_builder_opt_in_recovery_expands_sparse_dataset():
+    frame = add_event_columns(make_frame(40))
+    frame.loc[5, "bos"] = "BULLISH_BOS"
+
+    builder = SMCTrainingEventBuilder(
+        {
+            "training_events": {
+                "continuation_window": 0,
+                "minimum_candidate_spacing": 1,
+                "max_candidates_per_event": 1,
+                "minimum_labeled_candidates_per_symbol": 10,
+            },
+            "model": {"label_horizon": 5},
+        }
+    )
+    candidates = builder.build(frame)
+
+    assert builder.last_build_stats["recovery_enabled"] is True
+    assert builder.last_build_stats["recovery_mode"] is True
+    assert builder.last_build_stats["recovery_window"] > 0
+    assert builder.last_build_stats["recovery_spacing"] == 1
+    assert len(candidates) >= 10
+
+
 def test_training_builder_labels_use_canonical_direction_values():
     frame = add_event_columns(make_frame(60))
     frame.loc[10, "bos"] = "BULLISH_BOS"
