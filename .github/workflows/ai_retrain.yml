@@ -9,7 +9,6 @@ on:
     paths:
       - "scripts/train_models.py"
       - "scripts/validate_model.py"
-      - "models/**"
       - "core/**"
       - "config/settings.yaml"
       - "requirements-train.txt"
