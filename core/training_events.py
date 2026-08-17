@@ -80,9 +80,10 @@ class SMCTrainingEventBuilder:
         """
         Build causal event/continuation candidates.
 
-        The returned schema is deliberately explicit rather than relying on
-        dataclass ``__dict__`` serialization. This prevents an internal field
-        rename from silently changing the training-data contract.
+        Candidate spacing is applied independently inside each originating
+        event window. The previous implementation used a single global
+        spacing cursor per direction, which could suppress later SMC events
+        whenever two events occurred within the spacing interval.
         """
 
         columns = [
@@ -96,24 +97,16 @@ class SMCTrainingEventBuilder:
             return pd.DataFrame(columns=columns)
 
         candidates: list[TrainingCandidate] = []
-        last_selected_by_direction = {
-            1: -10**9,
-            -1: -10**9,
-        }
-
         event_indices: list[tuple[int, str, int]] = []
 
         for index in range(len(frame)):
-            event_type, direction = self._event_at(
-                frame.iloc[index]
-            )
+            event_type, direction = self._event_at(frame.iloc[index])
             if event_type is not None:
-                event_indices.append(
-                    (index, event_type, direction)
-                )
+                event_indices.append((index, event_type, direction))
 
         for event_index, event_type, direction in event_indices:
             emitted = 0
+            last_candidate_index = -10**9
 
             for distance in range(self.window + 1):
                 candidate_index = event_index + distance
@@ -121,11 +114,7 @@ class SMCTrainingEventBuilder:
                 if candidate_index >= len(frame):
                     break
 
-                if (
-                    candidate_index
-                    < last_selected_by_direction[direction]
-                    + self.min_spacing
-                ):
+                if candidate_index < last_candidate_index + self.min_spacing:
                     continue
 
                 row = frame.iloc[candidate_index]
@@ -149,9 +138,7 @@ class SMCTrainingEventBuilder:
                     )
                 )
 
-                last_selected_by_direction[direction] = (
-                    candidate_index
-                )
+                last_candidate_index = candidate_index
                 emitted += 1
 
                 if emitted >= self.max_candidates_per_event:
@@ -173,7 +160,7 @@ class SMCTrainingEventBuilder:
             columns=columns,
         )
 
-        result = (
+        return (
             result.drop_duplicates(
                 subset=[
                     "candidate_index",
@@ -188,8 +175,6 @@ class SMCTrainingEventBuilder:
             .reset_index(drop=True)
         )
 
-        return result
-
     @staticmethod
     def label_candidates(
         frame: pd.DataFrame,
@@ -199,7 +184,14 @@ class SMCTrainingEventBuilder:
         rr: float,
         horizon: int,
     ) -> pd.DataFrame:
-        """Label candidates by TP-before-SL within the forward horizon."""
+        """
+        Label candidates by TP-before-SL within the forward horizon.
+
+        A candidate that reaches neither TP nor SL during the horizon is
+        retained as label 0. Dropping unresolved candidates creates selection
+        bias and can collapse the training dataset when volatility is low.
+        A same-candle TP/SL collision is also conservatively labelled 0.
+        """
 
         rows: list[dict] = []
 
@@ -229,9 +221,7 @@ class SMCTrainingEventBuilder:
             stop = entry - direction * risk
             target = entry + direction * risk * float(rr)
 
-            future = frame.iloc[
-                index + 1 : index + horizon + 1
-            ]
+            future = frame.iloc[index + 1 : index + horizon + 1]
 
             if direction > 0:
                 hit_target = future["high"] >= target
@@ -240,15 +230,8 @@ class SMCTrainingEventBuilder:
                 hit_target = future["low"] <= target
                 hit_stop = future["high"] >= stop
 
-            target_hits = np.flatnonzero(
-                hit_target.to_numpy()
-            )
-            stop_hits = np.flatnonzero(
-                hit_stop.to_numpy()
-            )
-
-            if not target_hits.size and not stop_hits.size:
-                continue
+            target_hits = np.flatnonzero(hit_target.to_numpy())
+            stop_hits = np.flatnonzero(hit_stop.to_numpy())
 
             target_first = (
                 target_hits.size > 0
@@ -265,19 +248,16 @@ class SMCTrainingEventBuilder:
                 )
             )
 
-            # A same-candle TP/SL collision is intentionally labelled 0.
-            # Without tick-level sequencing, claiming TP-first would introduce
-            # an optimistic execution assumption.
-            label = 1.0 if target_first else 0.0 if stop_first else 0.0
+            # No target before stop, including unresolved and same-candle
+            # collisions, is conservatively represented as a negative label.
+            label = 1.0 if target_first else 0.0
 
             rows.append(
                 {
                     "candidate_index": index,
                     "direction": direction_name,
                     "event_type": str(candidate.event_type),
-                    "distance_from_event": int(
-                        candidate.distance_from_event
-                    ),
+                    "distance_from_event": int(candidate.distance_from_event),
                     "label": label,
                 }
             )
