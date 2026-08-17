@@ -53,8 +53,8 @@ training_events:
   recovery_continuation_window: 512
   recovery_max_candidates_per_event: 512
   recovery_growth_factor: 2
-  recovery_max_window: 2048
-  recovery_max_candidates_per_event_limit: 2048
+  recovery_max_window: 8192
+  recovery_max_candidates_per_event_limit: 8192
   recovery_candidate_buffer: 64
 
 confluence:
