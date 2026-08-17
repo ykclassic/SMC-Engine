@@ -10,6 +10,7 @@ on:
     branches:
       - main
     paths:
+      - ".github/workflows/ai_retrain.yml"
       - "scripts/train_models.py"
       - "scripts/validate_model.py"
       - "core/**"
@@ -81,9 +82,64 @@ jobs:
           python -m compileall -q core scripts models data utils
 
       - name: Full Test Suite
+        id: full_test_suite
         run: |
           set -euo pipefail
           python -m pytest -q
+
+      - name: Full Test Suite Failure Diagnostics
+        if: failure()
+        run: |
+          set -u
+
+          report="test-suite-failure.txt"
+
+          {
+            echo "AI retraining full-suite diagnostic report"
+            echo "Commit: ${GITHUB_SHA}"
+            echo "Workflow run: ${GITHUB_RUN_ID}"
+            echo ""
+            echo "=== tests/test_core.py ==="
+          } > "$report"
+
+          python -m pytest -q tests/test_core.py --tb=long >> "$report" 2>&1
+          core_status=$?
+
+          {
+            echo ""
+            echo "=== tests/test_journal.py ==="
+          } >> "$report"
+
+          python -m pytest -q tests/test_journal.py --tb=long >> "$report" 2>&1
+          journal_status=$?
+
+          {
+            echo ""
+            echo "=== tests/test_training_events.py ==="
+          } >> "$report"
+
+          python -m pytest -q tests/test_training_events.py --tb=long >> "$report" 2>&1
+          training_events_status=$?
+
+          {
+            echo ""
+            echo "=== exit codes ==="
+            echo "test_core.py=${core_status}"
+            echo "test_journal.py=${journal_status}"
+            echo "test_training_events.py=${training_events_status}"
+          } >> "$report"
+
+          echo "Detailed test diagnostics written to $report"
+          cat "$report"
+
+      - name: Upload Full Test Diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-suite-diagnostics-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          path: test-suite-failure.txt
 
       # ------------------------------------------------------------
       # RUNTIME DIAGNOSTICS
