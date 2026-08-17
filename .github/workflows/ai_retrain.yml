@@ -43,16 +43,15 @@ jobs:
       - name: Install Training Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-train.txt
+          pip install --prefer-binary -r requirements-train.txt
 
-      - name: Validate Secrets
+      - name: Validate Exchange Secrets
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          for name in EXCHANGE_API_KEY EXCHANGE_API_SECRET EXCHANGE_PASSPHRASE DISCORD_WEBHOOK_URL; do
+          for name in EXCHANGE_API_KEY EXCHANGE_API_SECRET EXCHANGE_PASSPHRASE; do
             if [ -z "${!name}" ]; then echo "Missing $name"; exit 1; fi
           done
 
@@ -61,7 +60,6 @@ jobs:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python scripts/train_models.py
 
       - name: Validate Out-of-Sample Metrics
@@ -69,7 +67,6 @@ jobs:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python scripts/validate_model.py
 
       - name: Upload Validated Artifacts
