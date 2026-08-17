@@ -1,58 +1,57 @@
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+
 import ccxt
 import pandas as pd
-import logging
+
 
 class ExchangeInterface:
-    def __init__(self, config):
-        self.logger = logging.getLogger("Nexus-ExchangeAPI")
-        
-        # Mapping config/env to CCXT requirements
-        # Note: 'password' is the CCXT key name for Bitget's API Passphrase
-        try:
-            self.exchange = ccxt.bitget({
-                'apiKey': config.get('api_key'),
-                'secret': config.get('api_secret'),
-                'password': config.get('passphrase'), 
-                'enableRateLimit': True,
-                'options': {
-                    'defaultType': 'swap', # Targets USDT-Margined Futures
-                    'recvWindow': 5000
-                }
-            })
-            self.logger.info("Exchange Interface initialized for Bitget.")
-        except Exception as e:
-            self.logger.error(f"Failed to initialize Exchange: {e}")
-            raise
+    def __init__(self, config: dict) -> None:
+        self.logger = logging.getLogger("SMC-Exchange")
+        exchange_name = config["trading"].get("exchange", "bitget").lower()
+        if exchange_name != "bitget":
+            raise ValueError(f"Unsupported exchange: {exchange_name}")
+        self.exchange = ccxt.bitget(
+            {
+                "apiKey": config.get("api_key"),
+                "secret": config.get("api_secret"),
+                "password": config.get("passphrase"),
+                "enableRateLimit": True,
+                "options": {
+                    "defaultType": config["trading"].get("market_type", "swap"),
+                    "recvWindow": 5000,
+                },
+            }
+        )
+        self.exchange.load_markets()
+        self.logger.info("Bitget interface initialized with %d markets.", len(self.exchange.markets))
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 200):
-        """
-        Fetches historical candle data and returns a cleaned DataFrame.
-        """
-        try:
-            # CCXT returns: [timestamp, open, high, low, close, volume]
-            raw_data = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            
-            df = pd.DataFrame(
-                raw_data, 
-                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-            )
-            
-            # Convert timestamp to datetime and numeric types to float
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            cols = ['open', 'high', 'low', 'close', 'volume']
-            df[cols] = df[cols].astype(float)
-            
-            return df
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 200) -> pd.DataFrame:
+        """Fetch closed OHLCV candles only and normalize timestamps to UTC."""
+        if symbol not in self.exchange.markets:
+            raise ValueError(f"Symbol {symbol} is not available on Bitget")
+        raw = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        if not raw:
+            raise ValueError(f"No OHLCV returned for {symbol} {timeframe}")
 
-        except Exception as e:
-            self.logger.error(f"Error fetching data for {symbol}: {e}")
-            return pd.DataFrame() # Return empty DF to prevent engine crash
+        df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        numeric = ["open", "high", "low", "close", "volume"]
+        df[numeric] = df[numeric].apply(pd.to_numeric, errors="coerce")
+        df = df.dropna(subset=numeric).drop_duplicates("timestamp").sort_values("timestamp").reset_index(drop=True)
 
-    def get_account_balance(self):
-        """Returns the total USDT balance available for trading."""
-        try:
-            balance = self.exchange.fetch_balance()
-            return float(balance['total'].get('USDT', 0))
-        except Exception as e:
-            self.logger.error(f"Could not fetch balance: {e}")
-            return 0.0
+        # The final CCXT candle can still be forming. Exclude it from all decisions.
+        now = pd.Timestamp(datetime.now(timezone.utc))
+        tf_ms = self.exchange.parse_timeframe(timeframe) * 1000
+        if not df.empty and (now.value // 1_000_000) < (df.iloc[-1]["timestamp"].value // 1_000_000) + tf_ms:
+            df = df.iloc[:-1].reset_index(drop=True)
+
+        if df.empty:
+            raise ValueError(f"No closed candles available for {symbol} {timeframe}")
+        return df
+
+    def get_account_balance(self) -> float:
+        balance = self.exchange.fetch_balance()
+        return float(balance.get("total", {}).get("USDT", 0.0))
