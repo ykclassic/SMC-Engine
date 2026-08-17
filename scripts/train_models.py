@@ -244,99 +244,6 @@ def build_labeled_dataset(
 
     builder = SMCTrainingEventBuilder(config)
 
-    candidates = builder.build(frame)
-
-    candidates = validate_candidates(
-        candidates,
-        len(frame),
-    )
-
-    labels = builder.label_candidates(
-        frame,
-        candidates,
-        feature_engineer._atr(frame),
-        float(
-            config["risk_management"]["atr_sl_multiplier"]
-        ),
-        float(
-            config["risk_management"]["default_tp_rr"]
-        ),
-        int(
-            config["model"].get(
-                "label_horizon",
-                20,
-            )
-        ),
-    )
-
-    if labels is None or labels.empty:
-        raise RuntimeError(
-            "SMCTrainingEventBuilder produced zero labels"
-        )
-
-    missing = REQUIRED_LABEL_COLUMNS.difference(
-        labels.columns
-    )
-
-    if missing:
-        raise RuntimeError(
-            "SMCTrainingEventBuilder label contract violation: "
-            f"missing columns {sorted(missing)}; "
-            f"received {sorted(labels.columns.tolist())}"
-        )
-
-    labels = labels.copy()
-
-    labels["candidate_index"] = pd.to_numeric(
-        labels["candidate_index"],
-        errors="coerce",
-    )
-
-    labels["label"] = pd.to_numeric(
-        labels["label"],
-        errors="coerce",
-    )
-
-    labels = labels.dropna(
-        subset=[
-            "candidate_index",
-            "label",
-        ]
-    )
-
-    labels["candidate_index"] = (
-        labels["candidate_index"].astype(int)
-    )
-
-    labels["label"] = labels["label"].astype(float)
-
-    invalid_labels = ~labels["label"].isin([0.0, 1.0])
-
-    if invalid_labels.any():
-        raise RuntimeError(
-            "Training labels must be binary 0/1. "
-            f"Invalid values: "
-            f"{sorted(labels.loc[invalid_labels, 'label'].unique())}"
-        )
-
-    labels = labels[
-        labels["candidate_index"] >= sequence_length - 1
-    ].copy()
-
-    labels = labels[
-        labels["candidate_index"] < len(frame)
-    ].copy()
-
-    labels = labels.sort_values(
-        ["candidate_index", "direction"],
-        kind="stable",
-    ).reset_index(drop=True)
-
-    labels = labels.drop_duplicates(
-        subset=["candidate_index", "direction"],
-        keep="first",
-    ).reset_index(drop=True)
-
     minimum = int(
         config["training_events"].get(
             "minimum_labeled_candidates_per_symbol",
@@ -344,10 +251,125 @@ def build_labeled_dataset(
         )
     )
 
-    if len(labels) < minimum:
+    max_recovery_iterations = int(
+        config["training_events"].get(
+            "label_recovery_iterations",
+            5,
+        )
+    )
+
+    labels = None
+
+    for iteration in range(max_recovery_iterations + 1):
+        candidates = builder.build(frame)
+
+        candidates = validate_candidates(
+            candidates,
+            len(frame),
+        )
+
+        labels = builder.label_candidates(
+            frame,
+            candidates,
+            feature_engineer._atr(frame),
+            float(
+                config["risk_management"]["atr_sl_multiplier"]
+            ),
+            float(
+                config["risk_management"]["default_tp_rr"]
+            ),
+            int(
+                config["model"].get(
+                    "label_horizon",
+                    20,
+                )
+            ),
+        )
+
+        if labels is None or labels.empty:
+            if iteration < max_recovery_iterations and hasattr(builder, "expand_capacity"):
+                builder.expand_capacity()
+                continue
+            raise RuntimeError(
+                "SMCTrainingEventBuilder produced zero labels"
+            )
+
+        missing = REQUIRED_LABEL_COLUMNS.difference(
+            labels.columns
+        )
+
+        if missing:
+            raise RuntimeError(
+                "SMCTrainingEventBuilder label contract violation: "
+                f"missing columns {sorted(missing)}; "
+                f"received {sorted(labels.columns.tolist())}"
+            )
+
+        labels = labels.copy()
+
+        labels["candidate_index"] = pd.to_numeric(
+            labels["candidate_index"],
+            errors="coerce",
+        )
+
+        labels["label"] = pd.to_numeric(
+            labels["label"],
+            errors="coerce",
+        )
+
+        labels = labels.dropna(
+            subset=[
+                "candidate_index",
+                "label",
+            ]
+        )
+
+        labels["candidate_index"] = (
+            labels["candidate_index"].astype(int)
+        )
+
+        labels["label"] = labels["label"].astype(float)
+
+        invalid_labels = ~labels["label"].isin([0.0, 1.0])
+
+        if invalid_labels.any():
+            raise RuntimeError(
+                "Training labels must be binary 0/1. "
+                f"Invalid values: "
+                f"{sorted(labels.loc[invalid_labels, 'label'].unique())}"
+            )
+
+        labels = labels[
+            labels["candidate_index"] >= sequence_length - 1
+        ].copy()
+
+        labels = labels[
+            labels["candidate_index"] < len(frame)
+        ].copy()
+
+        labels = labels.sort_values(
+            ["candidate_index", "direction"],
+            kind="stable",
+        ).reset_index(drop=True)
+
+        labels = labels.drop_duplicates(
+            subset=["candidate_index", "direction"],
+            keep="first",
+        ).reset_index(drop=True)
+
+        if len(labels) >= minimum:
+            break
+
+        if iteration < max_recovery_iterations:
+            if hasattr(builder, "expand_capacity"):
+                builder.expand_capacity()
+            else:
+                break
+
+    if labels is None or len(labels) < minimum:
         raise RuntimeError(
             "Not enough labeled SMC candidates: "
-            f"{len(labels)}; required {minimum}"
+            f"{len(labels) if labels is not None else 0}; required {minimum}"
         )
 
     return features, labels
