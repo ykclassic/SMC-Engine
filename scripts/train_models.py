@@ -31,7 +31,6 @@ def build_dataset(config: dict):
     m15_tf = config["market_data"]["timeframes"]["m15"]
     limit = int(config["market_data"].get("training_history_candles", 5000))
     frames = []
-
     for symbol in symbols:
         frame = exchange.fetch_ohlcv_history(symbol, m15_tf, candles=limit)
         processed = structure.analyze(frame)
@@ -41,14 +40,13 @@ def build_dataset(config: dict):
         processed = liquidity.detect_sweeps(processed)
         processed["symbol"] = symbol
         frames.append(processed)
-
     if not frames:
         raise RuntimeError("No real training data was retrieved")
     return frames
 
 
 def build_labels(frame, config: dict) -> np.ndarray:
-    """Label only actual SMC candidates; no momentum-only synthetic targets."""
+    """Label explicit SMC events only; no momentum-only or synthetic targets."""
     fe = FeatureEngineer()
     atr = fe._atr(frame).to_numpy()
     rr = float(config["risk_management"]["default_tp_rr"])
@@ -60,10 +58,24 @@ def build_labels(frame, config: dict) -> np.ndarray:
         if not np.isfinite(atr[i]) or atr[i] <= 0:
             continue
         row = frame.iloc[i]
-        sweep = row.get("liquidity_sweep")
-        bos = row.get("bos")
-        choch = row.get("choch")
-        direction = 1 if sweep == "BULLISH_SWEEP" or bos == "BULLISH_BOS" or choch == "BULLISH_CHOCH" else -1 if sweep == "BEARISH_SWEEP" or bos == "BEARISH_BOS" or choch == "BEARISH_CHOCH" else 0
+        event_direction = {
+            "BULLISH_SWEEP": 1,
+            "BULLISH_BOS": 1,
+            "BULLISH_CHOCH": 1,
+            "BULLISH_FVG": 1,
+            "BULLISH_OB": 1,
+            "BEARISH_SWEEP": -1,
+            "BEARISH_BOS": -1,
+            "BEARISH_CHOCH": -1,
+            "BEARISH_FVG": -1,
+            "BEARISH_OB": -1,
+        }
+        direction = next(
+            (event_direction[value] for value in (
+                row.get("liquidity_sweep"), row.get("bos"), row.get("choch"), row.get("fvg"), row.get("order_block")
+            ) if value in event_direction),
+            0,
+        )
         if direction == 0:
             continue
 
@@ -94,7 +106,7 @@ def sequence_dataset(frame, config: dict):
     labels = build_labels(frame, config)
     valid = np.where(np.isfinite(labels))[0]
     valid = valid[valid >= sequence_length - 1]
-    if len(valid) < 200:
+    if len(valid) < 100:
         raise RuntimeError(f"Not enough labeled SMC candidates: {len(valid)}")
     return raw_features, labels, valid
 
@@ -130,6 +142,8 @@ def train(config: dict) -> None:
         features, labels, indices = sequence_dataset(frame, config)
         split1 = int(len(indices) * 0.70)
         split2 = int(len(indices) * 0.85)
+        if split1 < 50 or split2 - split1 < 20 or len(indices) - split2 < 20:
+            raise RuntimeError(f"Chronological split is too small for {len(indices)} SMC events")
         datasets.append((features, labels, indices, split1, split2))
         train_feature_frames.append(features.iloc[: indices[split1] + 1])
 
@@ -212,7 +226,7 @@ def train(config: dict) -> None:
         "test": test_metrics,
         "trained_symbols": config["trading"]["symbols"],
         "training_candles_per_symbol": config["market_data"]["training_history_candles"],
-        "label": "TP-before-SL on actual SMC BOS/CHoCH/liquidity candidates",
+        "label": "TP-before-SL on explicit SMC BOS/CHoCH/liquidity/FVG/order-block events",
     }
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print(json.dumps(metadata, indent=2))
