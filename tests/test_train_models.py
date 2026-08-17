@@ -8,7 +8,9 @@ from scripts.train_models import (
 
 
 def test_classification_metrics_uses_supplied_threshold():
-    probs = np.array([0.51, 0.55, 0.74, 0.81])
+    # At threshold 0.75 only 0.81 is predicted positive. The corresponding
+    # truth value must therefore be 1 for precision=1.0 and recall=0.5.
+    probs = np.array([0.51, 0.55, 0.81, 0.74])
     truth = np.array([1, 0, 1, 0])
 
     metrics = _classification_metrics(
