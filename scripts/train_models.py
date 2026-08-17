@@ -213,8 +213,6 @@ def validate_candidates(
         kind="stable",
     ).reset_index(drop=True)
 
-    # Multiple SMC detections can legitimately occur around the same
-    # candle, but the same candle/direction must not be duplicated.
     result = result.drop_duplicates(
         subset=["candidate_index", "direction"],
         keep="first",
@@ -287,7 +285,10 @@ def build_labeled_dataset(
         )
 
         if labels is None or labels.empty:
-            if iteration < max_recovery_iterations and hasattr(builder, "expand_capacity"):
+            if (
+                iteration < max_recovery_iterations
+                and hasattr(builder, "expand_capacity")
+            ):
                 builder.expand_capacity()
                 continue
             raise RuntimeError(
@@ -459,8 +460,12 @@ def make_sequences(
     )
 
 
-def evaluate(model, X, y):
-    """Evaluate model probabilities and classification metrics."""
+def _classification_metrics(
+    probs: np.ndarray,
+    truth: np.ndarray,
+    threshold: float,
+) -> dict:
+    """Calculate classification metrics at an explicit decision threshold."""
 
     from sklearn.metrics import (
         accuracy_score,
@@ -468,6 +473,70 @@ def evaluate(model, X, y):
         recall_score,
         roc_auc_score,
     )
+
+    threshold = float(threshold)
+
+    if not 0.0 < threshold < 1.0:
+        raise ValueError(
+            f"Decision threshold must be between 0 and 1: {threshold}"
+        )
+
+    probs = np.asarray(probs, dtype=float).ravel()
+    truth = np.asarray(truth, dtype=int).ravel()
+
+    if len(probs) != len(truth):
+        raise ValueError(
+            "Prediction and truth arrays must have equal length"
+        )
+
+    if not np.isfinite(probs).all():
+        raise RuntimeError(
+            "Model produced non-finite predictions"
+        )
+
+    pred = (probs >= threshold).astype(int)
+
+    return {
+        "accuracy": float(
+            accuracy_score(truth, pred)
+        ),
+        "precision": float(
+            precision_score(
+                truth,
+                pred,
+                zero_division=0,
+            )
+        ),
+        "recall": float(
+            recall_score(
+                truth,
+                pred,
+                zero_division=0,
+            )
+        ),
+        "roc_auc": float(
+            roc_auc_score(truth, probs)
+        )
+        if len(np.unique(truth)) > 1
+        else 0.5,
+        "positive_rate": float(
+            truth.mean()
+        ),
+        "predicted_positive_rate": float(
+            pred.mean()
+        ),
+        "threshold": threshold,
+        "samples": int(len(truth)),
+    }
+
+
+def evaluate(
+    model,
+    X,
+    y,
+    threshold: float = 0.5,
+):
+    """Evaluate model probabilities using the supplied decision threshold."""
 
     model.eval()
 
@@ -487,48 +556,80 @@ def evaluate(model, X, y):
         .ravel()
     )
 
-    if not np.isfinite(probs).all():
-        raise RuntimeError(
-            "Model produced non-finite predictions"
-        )
-
-    pred = (
-        probs >= 0.5
-    ).astype(int)
-
-    metrics = {
-        "accuracy": float(
-            accuracy_score(truth, pred)
-        ),
-        "precision": float(
-            precision_score(
-                truth,
-                pred,
-                zero_division=0,
-            )
-        ),
-        "recall": float(
-            recall_score(
-                truth,
-                pred,
-                zero_division=0,
-            )
-        ),
-        "roc_auc": float(
-            roc_auc_score(
-                truth,
-                probs,
-            )
-        )
-        if len(np.unique(truth)) > 1
-        else 0.5,
-        "positive_rate": float(
-            truth.mean()
-        ),
-        "samples": int(len(truth)),
-    }
+    metrics = _classification_metrics(
+        probs,
+        truth,
+        threshold,
+    )
 
     return metrics, probs, truth
+
+
+def select_decision_threshold(
+    probs: np.ndarray,
+    truth: np.ndarray,
+    minimum: float = 0.50,
+    maximum: float = 0.80,
+    steps: int = 31,
+) -> tuple[float, float]:
+    """Select the validation-only threshold maximizing F1."""
+
+    if steps < 2:
+        raise ValueError("Threshold search requires at least two steps")
+
+    best_threshold = float(minimum)
+    best_f1 = -1.0
+
+    probs = np.asarray(probs, dtype=float).ravel()
+    truth = np.asarray(truth, dtype=int).ravel()
+
+    for threshold in np.linspace(
+        float(minimum),
+        float(maximum),
+        int(steps),
+    ):
+        pred = (
+            probs >= threshold
+        ).astype(int)
+
+        tp = (
+            (pred == 1)
+            & (truth == 1)
+        ).sum()
+
+        fp = (
+            (pred == 1)
+            & (truth == 0)
+        ).sum()
+
+        fn = (
+            (pred == 0)
+            & (truth == 1)
+        ).sum()
+
+        precision = (
+            tp / max(tp + fp, 1)
+        )
+
+        recall = (
+            tp / max(tp + fn, 1)
+        )
+
+        f1 = (
+            2
+            * precision
+            * recall
+            / max(
+                precision + recall,
+                1e-12,
+            )
+        )
+
+        if f1 > best_f1:
+            best_f1 = float(f1)
+            best_threshold = float(threshold)
+
+    return best_threshold, best_f1
 
 
 def train(config: dict) -> None:
@@ -818,68 +919,61 @@ def train(config: dict) -> None:
         best_state
     )
 
-    val_metrics, val_probs, val_truth = evaluate(
+    validation_base_metrics, val_probs, val_truth = evaluate(
         model,
         X_val,
         y_val,
+        threshold=0.5,
     )
 
-    test_metrics, _, _ = evaluate(
+    best_threshold, best_f1 = select_decision_threshold(
+        val_probs,
+        val_truth,
+    )
+
+    # The threshold is selected exclusively from validation data. The frozen
+    # threshold is then applied to both validation reporting and the untouched
+    # test gate. Test probabilities never influence threshold selection.
+    val_metrics = _classification_metrics(
+        val_probs,
+        val_truth,
+        best_threshold,
+    )
+
+    _, test_probs, test_truth = evaluate(
         model,
         X_test,
         y_test,
+        threshold=best_threshold,
     )
 
-    best_threshold = 0.60
-    best_f1 = -1.0
+    test_metrics = _classification_metrics(
+        test_probs,
+        test_truth,
+        best_threshold,
+    )
 
-    for threshold in np.linspace(
-        0.50,
-        0.80,
-        31,
-    ):
-        pred = (
-            val_probs >= threshold
-        ).astype(int)
+    print(
+        "Decision threshold selected from validation: "
+        f"threshold={best_threshold:.4f} "
+        f"validation_f1={best_f1:.4f}"
+    )
 
-        tp = (
-            (pred == 1)
-            & (val_truth == 1)
-        ).sum()
+    print(
+        "Validation metrics at frozen threshold: "
+        f"precision={val_metrics['precision']:.4f} "
+        f"recall={val_metrics['recall']:.4f} "
+        f"f1={best_f1:.4f}"
+    )
 
-        fp = (
-            (pred == 1)
-            & (val_truth == 0)
-        ).sum()
-
-        fn = (
-            (pred == 0)
-            & (val_truth == 1)
-        ).sum()
-
-        precision = (
-            tp / max(tp + fp, 1)
-        )
-
-        recall = (
-            tp / max(tp + fn, 1)
-        )
-
-        f1 = (
-            2
-            * precision
-            * recall
-            / max(
-                precision + recall,
-                1e-12,
-            )
-        )
-
-        if f1 > best_f1:
-            best_f1 = f1
-            best_threshold = float(
-                threshold
-            )
+    print(
+        "Test metrics at frozen validation threshold: "
+        f"roc_auc={test_metrics['roc_auc']:.4f} "
+        f"precision={test_metrics['precision']:.4f} "
+        f"recall={test_metrics['recall']:.4f} "
+        f"predicted_positive_rate="
+        f"{test_metrics['predicted_positive_rate']:.4f}"
+    )
 
     minimum_auc = float(
         config["model"].get(
@@ -895,18 +989,25 @@ def train(config: dict) -> None:
         )
     )
 
-    if (
-        test_metrics["roc_auc"]
-        < minimum_auc
-        or test_metrics["precision"]
-        < minimum_precision
-    ):
+    failed_gates = []
+
+    if test_metrics["roc_auc"] < minimum_auc:
+        failed_gates.append(
+            f"ROC-AUC {test_metrics['roc_auc']:.4f} < {minimum_auc:.4f}"
+        )
+
+    if test_metrics["precision"] < minimum_precision:
+        failed_gates.append(
+            "precision "
+            f"{test_metrics['precision']:.4f} < "
+            f"{minimum_precision:.4f}"
+        )
+
+    if failed_gates:
         raise RuntimeError(
-            "Model rejected: "
-            f"test ROC-AUC="
-            f"{test_metrics['roc_auc']:.4f} "
-            f"precision="
-            f"{test_metrics['precision']:.4f}"
+            "Model rejected at frozen validation threshold "
+            f"{best_threshold:.4f}: "
+            + "; ".join(failed_gates)
         )
 
     weights = Path(
@@ -946,6 +1047,8 @@ def train(config: dict) -> None:
         "sequence_length": sequence_length,
         "decision_threshold": best_threshold,
         "validation": val_metrics,
+        "validation_threshold_selection_f1": best_f1,
+        "validation_base_metrics": validation_base_metrics,
         "test": test_metrics,
         "trained_symbols": config[
             "trading"
