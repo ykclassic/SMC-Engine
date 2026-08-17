@@ -47,11 +47,17 @@ class SMCTrainingEventBuilder:
     configured continuation window, so no future candle is used to create an
     event.
 
-    Candidate generation has a deterministic recovery mode. If the configured
-    event window cannot supply enough distinct observations for the downstream
-    training quality gate, the builder widens the continuation window and
-    spacing constraints rather than fabricating data or lowering the quality
-    gate. The recovery remains causal and uses only real candles.
+    Recovery mode is opt-in through the explicit
+    ``minimum_labeled_candidates_per_symbol`` training configuration. This is
+    important because small/unit-test configurations should retain the normal
+    configured window and candidate limits rather than unexpectedly widening
+    them because the production training threshold is not present.
+
+    When recovery is enabled and the configured event window cannot supply
+    enough distinct observations for the downstream training quality gate,
+    the builder widens the continuation window and spacing constraints rather
+    than fabricating data or lowering the quality gate. Recovery remains
+    causal and uses only real candles.
 
     Multiple SMC events may resolve to the same candle/direction. Such
     observations are deduplicated because the GRU input is identical for that
@@ -74,15 +80,20 @@ class SMCTrainingEventBuilder:
             1,
             int(training.get("max_candidates_per_event", 3)),
         )
+
+        minimum_labeled_value = training.get(
+            "minimum_labeled_candidates_per_symbol"
+        )
+        self.recovery_enabled = minimum_labeled_value is not None
         self.minimum_labeled_candidates = max(
             1,
             int(
-                training.get(
-                    "minimum_labeled_candidates_per_symbol",
-                    300,
-                )
+                minimum_labeled_value
+                if minimum_labeled_value is not None
+                else 1
             ),
         )
+
         self.label_horizon = max(
             0,
             int(model.get("label_horizon", 20)),
@@ -198,11 +209,6 @@ class SMCTrainingEventBuilder:
                 if candidate_index < last_candidate_index + spacing:
                     continue
 
-                # A post-event candle remains a valid causal observation even
-                # when its body temporarily moves against the event direction.
-                # The eventual TP-before-SL label determines whether that
-                # observation was successful. Filtering by candle body here
-                # would discard valid negative and recovery examples.
                 candidates.append(
                     TrainingCandidate(
                         candidate_index=candidate_index,
@@ -237,7 +243,13 @@ class SMCTrainingEventBuilder:
                 "event_counts": {},
                 "raw_candidates": 0,
                 "unique_candidates": 0,
+                "candidate_deduplication": 0,
+                "target_candidates": 0,
                 "recovery_mode": False,
+                "recovery_enabled": self.recovery_enabled,
+                "recovery_window": self.window,
+                "recovery_spacing": self.min_spacing,
+                "recovery_max_candidates_per_event": self.max_candidates_per_event,
             }
             return pd.DataFrame(columns=columns)
 
@@ -256,16 +268,23 @@ class SMCTrainingEventBuilder:
                 "event_counts": {},
                 "raw_candidates": 0,
                 "unique_candidates": 0,
+                "candidate_deduplication": 0,
+                "target_candidates": 0,
                 "recovery_mode": False,
+                "recovery_enabled": self.recovery_enabled,
+                "recovery_window": self.window,
+                "recovery_spacing": self.min_spacing,
+                "recovery_max_candidates_per_event": self.max_candidates_per_event,
             }
             return pd.DataFrame(columns=columns)
 
-        # Build enough candidates to satisfy the downstream labeled-sample
-        # gate after accounting for the forward label horizon. This is a target
-        # for real observations, not a reason to relax the quality gate.
+        # Recovery is deliberately opt-in. Production configuration explicitly
+        # defines the labeled-sample quality gate; lightweight callers and unit
+        # tests that omit it retain the normal configured candidate contract.
         target_candidates = (
-            self.minimum_labeled_candidates
-            + self.label_horizon
+            self.minimum_labeled_candidates + self.label_horizon
+            if self.recovery_enabled
+            else 0
         )
 
         candidates = self._emit_candidates(
@@ -281,7 +300,7 @@ class SMCTrainingEventBuilder:
         recovery_spacing = self.min_spacing
         recovery_max = self.max_candidates_per_event
 
-        if len(result) < target_candidates:
+        if self.recovery_enabled and len(result) < target_candidates:
             recovery_mode = True
             recovery_spacing = 1
             recovery_window = max(
@@ -296,7 +315,12 @@ class SMCTrainingEventBuilder:
             )
             recovery_max = max(
                 self.max_candidates_per_event,
-                int(np.ceil(target_candidates / len(event_indices))) + 2,
+                int(
+                    np.ceil(
+                        target_candidates / len(event_indices)
+                    )
+                )
+                + 2,
             )
 
             candidates = self._emit_candidates(
@@ -321,6 +345,7 @@ class SMCTrainingEventBuilder:
             ),
             "target_candidates": int(target_candidates),
             "recovery_mode": recovery_mode,
+            "recovery_enabled": self.recovery_enabled,
             "recovery_window": int(recovery_window),
             "recovery_spacing": int(recovery_spacing),
             "recovery_max_candidates_per_event": int(recovery_max),
