@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -28,6 +29,14 @@ class ModelInference:
         self.model = SignalValidatorGRU(input_dim=len(FEATURE_COLUMNS)).to(self.device)
         self._load()
 
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
     def _load(self) -> None:
         for path in (self.model_path, self.scaler_path, self.metadata_path):
             if not path.exists():
@@ -38,12 +47,14 @@ class ModelInference:
                 return
 
         metadata = json.loads(self.metadata_path.read_text(encoding="utf-8"))
-        if metadata.get("feature_version") != FEATURE_VERSION:
-            raise RuntimeError("Model feature version does not match runtime feature version")
-        if metadata.get("feature_columns") != FEATURE_COLUMNS:
-            raise RuntimeError("Model feature columns do not match runtime feature columns")
+        if metadata.get("feature_version") != FEATURE_VERSION or metadata.get("feature_columns") != FEATURE_COLUMNS:
+            raise RuntimeError("Model feature schema does not match runtime")
         if int(metadata.get("sequence_length", -1)) != self.sequence_length:
-            raise RuntimeError("Model sequence length does not match runtime configuration")
+            raise RuntimeError("Model sequence length does not match runtime")
+        if metadata.get("model_sha256") != self._sha256(self.model_path):
+            raise RuntimeError("Model artifact hash mismatch")
+        if metadata.get("scaler_sha256") != self._sha256(self.scaler_path):
+            raise RuntimeError("Feature scaler hash mismatch")
 
         state = torch.load(self.model_path, map_location=self.device, weights_only=True)
         self.model.load_state_dict(state)
@@ -51,7 +62,7 @@ class ModelInference:
         self.decision_threshold = max(self.config_threshold, float(metadata.get("decision_threshold", self.config_threshold)))
         self.model.eval()
         self.available = True
-        self.logger.info("Loaded model version %s with decision threshold %.3f", metadata.get("model_version", "unknown"), self.decision_threshold)
+        self.logger.info("Loaded model %s with threshold %.3f", metadata.get("model_version", "unknown"), self.decision_threshold)
 
     def predict_confidence(self, df) -> float:
         if not self.available:
