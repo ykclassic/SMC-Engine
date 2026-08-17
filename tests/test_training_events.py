@@ -100,8 +100,6 @@ def test_builder_processes_all_event_types_on_same_candle():
     )
     candidates = builder.build(frame)
 
-    # All three detections are recorded as event origins even though they
-    # resolve to one canonical GRU observation at the same candle/direction.
     assert builder.last_build_stats["event_count"] == 3
     assert builder.last_build_stats["event_counts"] == {
         "BULLISH_BOS": 1,
@@ -154,6 +152,66 @@ def test_training_builder_opt_in_recovery_expands_sparse_dataset():
     assert builder.last_build_stats["recovery_window"] > 0
     assert builder.last_build_stats["recovery_spacing"] == 1
     assert len(candidates) >= 10
+
+
+def test_adaptive_recovery_does_not_stop_at_298_when_300_are_required():
+    builder = SMCTrainingEventBuilder(
+        {
+            "training_events": {
+                "minimum_labeled_candidates_per_symbol": 300,
+                "recovery_continuation_window": 512,
+                "recovery_max_candidates_per_event": 512,
+                "recovery_growth_factor": 2,
+                "recovery_max_window": 2048,
+                "recovery_max_candidates_per_event_limit": 2048,
+                "recovery_candidate_buffer": 64,
+            },
+            "model": {
+                "sequence_length": 32,
+                "label_horizon": 20,
+            },
+        }
+    )
+
+    # Run #60/#latest failures produced 298 usable labels against a hard
+    # requirement of 300. The builder must therefore maintain a safety buffer
+    # rather than treating 300 raw candidates as sufficient.
+    assert builder.minimum_labeled_candidates == 300
+    assert builder._recovery_target_candidates() == 415
+
+    frame = add_event_columns(make_frame(700))
+    frame.loc[50, "bos"] = "BULLISH_BOS"
+    frame.loc[300, "fvg"] = "BULLISH_FVG"
+    frame.loc[500, "liquidity_sweep"] = "BULLISH_SWEEP"
+
+    candidates = builder.build(frame)
+
+    assert builder.last_build_stats["recovery_mode"] is True
+    assert builder.last_build_stats["recovery_iterations"] >= 1
+    assert len(candidates) >= 415
+
+
+def test_adaptive_recovery_growth_is_bounded_by_frame():
+    frame = add_event_columns(make_frame(60))
+    frame.loc[10, "bos"] = "BULLISH_BOS"
+
+    builder = SMCTrainingEventBuilder(
+        {
+            "training_events": {
+                "minimum_labeled_candidates_per_symbol": 300,
+                "recovery_continuation_window": 512,
+                "recovery_max_window": 512,
+                "recovery_max_candidates_per_event": 512,
+                "recovery_max_candidates_per_event_limit": 512,
+            },
+            "model": {"sequence_length": 32, "label_horizon": 20},
+        }
+    )
+    candidates = builder.build(frame)
+
+    assert not candidates.empty
+    assert builder.last_build_stats["recovery_window"] <= len(frame) - 1
+    assert builder.last_build_stats["recovery_iterations"] >= 1
 
 
 def test_training_builder_labels_use_canonical_direction_values():
