@@ -198,16 +198,17 @@ def test_recovery_expands_beyond_previous_2048_window_ceiling():
     builder = SMCTrainingEventBuilder(
         {
             "training_events": {
-                # 766 + 20 + 64 = 850 candidate target. With two widely
-                # separated events, 512/2048 windows cannot reach that
-                # target, while the 4096 window can. This makes the test
-                # specifically exercise expansion beyond the old 2048 cap.
+                # 766 + 20 + 64 = 850 candidate target. Recovery starts
+                # with a 64-candidate-per-event cap and doubles both the
+                # candidate capacity and causal window. The target is not
+                # reachable until the 4096 window, exercising expansion past
+                # the previous 2048 ceiling.
                 "minimum_labeled_candidates_per_symbol": 766,
                 "recovery_continuation_window": 512,
                 "recovery_growth_factor": 2,
                 "recovery_max_window": 8192,
-                "recovery_max_candidates_per_event": 512,
-                "recovery_max_candidates_per_event_limit": 8192,
+                "recovery_max_candidates_per_event": 64,
+                "recovery_max_candidates_per_event_limit": 512,
                 "recovery_candidate_buffer": 64,
             },
             "model": {
@@ -220,7 +221,7 @@ def test_recovery_expands_beyond_previous_2048_window_ceiling():
     candidates = builder.build(frame)
 
     assert builder.last_build_stats["recovery_mode"] is True
-    assert builder.last_build_stats["recovery_iterations"] >= 3
+    assert builder.last_build_stats["recovery_iterations"] >= 4
     assert builder.last_build_stats["recovery_window"] >= 4096
     assert builder.last_build_stats["recovery_capacity_limited"] is False
     assert len(candidates) >= 850
