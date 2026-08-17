@@ -81,9 +81,8 @@ class SMCTrainingEventBuilder:
         Build causal event/continuation candidates.
 
         Candidate spacing is applied independently inside each originating
-        event window. The previous implementation used a single global
-        spacing cursor per direction, which could suppress later SMC events
-        whenever two events occurred within the spacing interval.
+        event window. A global direction-level spacing cursor can suppress
+        legitimate nearby SMC events and unnecessarily collapse the dataset.
         """
 
         columns = [
@@ -238,13 +237,6 @@ class SMCTrainingEventBuilder:
                 and (
                     not stop_hits.size
                     or target_hits[0] < stop_hits[0]
-                )
-            )
-            stop_first = (
-                stop_hits.size > 0
-                and (
-                    not target_hits.size
-                    or stop_hits[0] < target_hits[0]
                 )
             )
 
