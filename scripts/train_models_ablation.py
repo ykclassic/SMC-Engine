@@ -3,21 +3,17 @@
 This module deliberately does not write or promote production model artifacts.
 It builds one canonical labeled population, verifies its directional identity,
 and trains four isolated classifiers with identical data, splits, optimizer,
-seed, and training schedule:
+seed, and training schedule.
 
-- baseline: market sequence only
-- direction_only: market sequence + direction
-- event_only: market sequence + event type
-- direction_plus_event: market sequence + both
-
-The purpose is to identify which candidate representation changes validation
-AUC while keeping the labeled population fixed.
+The diagnostic report is persisted even when an experiment fails so CI can
+upload the evidence needed to diagnose the failure.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +30,7 @@ SEED = 42
 EPOCHS = 20
 LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 1e-5
+REPORT_PATH = Path("models/weights/label_context_ablation.json")
 
 EVENT_COLUMNS = tuple(CONTEXT_COLUMNS[1:])
 MODES = (
@@ -156,9 +153,14 @@ def _make_symbol_partitions(features, labels, engineer, mode: str):
     return partitions
 
 
-def _fit_mode(partitions: list[dict[str, list[torch.Tensor]]], mode: str) -> dict:
+def _fit_mode(partitions: list[dict], mode: str) -> dict:
     _seed()
-    context_dim = 0 if mode == "baseline" else (1 if mode == "direction_only" else 10 if mode == "event_only" else 11)
+    context_dim = {
+        "baseline": 0,
+        "direction_only": 1,
+        "event_only": len(EVENT_COLUMNS),
+        "direction_plus_event": len(CONTEXT_COLUMNS),
+    }[mode]
     model = DiagnosticGRU(len(FEATURE_COLUMNS), context_dim)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     criterion = nn.BCELoss(reduction="none")
@@ -183,7 +185,11 @@ def _fit_mode(partitions: list[dict[str, list[torch.Tensor]]], mode: str) -> dic
         model.train()
         optimizer.zero_grad()
         probs = model(X_train, C_train)
-        weights = torch.where(y_train > 0.5, torch.full_like(y_train, positive_weight), torch.ones_like(y_train))
+        weights = torch.where(
+            y_train > 0.5,
+            torch.full_like(y_train, positive_weight),
+            torch.ones_like(y_train),
+        )
         loss = (criterion(probs, y_train) * weights).mean()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -205,13 +211,21 @@ def _fit_mode(partitions: list[dict[str, list[torch.Tensor]]], mode: str) -> dic
     model.eval()
     with torch.no_grad():
         val_probs = model(X_val, C_val).cpu().numpy().ravel()
-        test_parts = []
-        test_truth_parts = []
-        for partition in partitions:
-            test_parts.append(model(partition["test"][0], partition["test"][1] if context_dim else None).cpu().numpy().ravel())
-            test_truth_parts.append(partition["test"][2].cpu().numpy().ravel().astype(int))
-    test_probs = np.concatenate(test_parts)
-    test_truth = np.concatenate(test_truth_parts)
+        test_probs = np.concatenate(
+            [
+                model(
+                    partition["test"][0],
+                    partition["test"][1] if context_dim else None,
+                )
+                .cpu()
+                .numpy()
+                .ravel()
+                for partition in partitions
+            ]
+        )
+    test_truth = np.concatenate(
+        [partition["test"][2].cpu().numpy().ravel().astype(int) for partition in partitions]
+    )
     val_truth = y_val.cpu().numpy().ravel().astype(int)
     return {
         "mode": mode,
@@ -231,10 +245,13 @@ def _integrity_report(labeled_frames: list[tuple[str, object]]) -> dict:
         keys = labels[["candidate_index", "direction"]].astype({"candidate_index": int}).copy()
         duplicate_keys = int(keys.duplicated(["candidate_index", "direction"]).sum())
         candle_collisions = int(labels["candidate_index"].duplicated(keep=False).sum())
-        directional_counts = {d: int((labels["direction"] == d).sum()) for d in ("LONG", "SHORT")}
+        directional_counts = {
+            d: int((labels["direction"] == d).sum()) for d in ("LONG", "SHORT")
+        }
         directional_positive_rates = {
             d: float(labels.loc[labels["direction"] == d, "label"].mean())
-            if (labels["direction"] == d).any() else 0.0
+            if (labels["direction"] == d).any()
+            else 0.0
             for d in ("LONG", "SHORT")
         }
         event_stats = {}
@@ -244,7 +261,9 @@ def _integrity_report(labeled_frames: list[tuple[str, object]]) -> dict:
                 "positive": int(group["label"].sum()),
                 "positive_rate": float(group["label"].mean()),
             }
-        canonical = labels[["candidate_index", "direction", "event_type", "label"]].sort_values(
+        canonical = labels[
+            ["candidate_index", "direction", "event_type", "label"]
+        ].sort_values(
             ["candidate_index", "direction", "event_type"], kind="stable"
         ).to_csv(index=False)
         fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -264,7 +283,6 @@ def _integrity_report(labeled_frames: list[tuple[str, object]]) -> dict:
         if duplicate_keys:
             raise RuntimeError(f"{symbol}: duplicate (candidate_index, direction) keys")
     report["population_fingerprints"] = fingerprints
-    report["population_identical_across_modes"] = True
     return report
 
 
@@ -285,18 +303,22 @@ def run(config: dict) -> dict:
         train_feature_frames.append(features.iloc[:train_end])
         raw_partitions.append((symbol, features, labels))
 
-    engineer.scaler.fit(np.concatenate([x.to_numpy() for x in train_feature_frames], axis=0))
+    engineer.scaler.fit(
+        np.concatenate([x.to_numpy() for x in train_feature_frames], axis=0)
+    )
     integrity = _integrity_report(labeled_frames)
 
     results = []
     for mode in MODES:
-        partitions = []
-        for _, features, labels in raw_partitions:
-            partitions.append(_make_symbol_partitions(features.to_numpy(), labels, engineer, mode))
+        partitions = [
+            _make_symbol_partitions(features.to_numpy(), labels, engineer, mode)
+            for _, features, labels in raw_partitions
+        ]
         results.append(_fit_mode(partitions, mode))
 
     return {
-        "diagnostic_version": "label-context-ablation-v1",
+        "diagnostic_version": "label-context-ablation-v2",
+        "status": "success",
         "seed": SEED,
         "epochs": EPOCHS,
         "learning_rate": LEARNING_RATE,
@@ -310,13 +332,31 @@ def run(config: dict) -> dict:
     }
 
 
+def _write_report(report: dict) -> None:
+    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_PATH.write_text(
+        json.dumps(report, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 def main() -> None:
     config = load_all_configs(require_notifications=False)
-    report = run(config)
-    output = Path("models/weights/label_context_ablation.json")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    try:
+        report = run(config)
+    except Exception as exc:
+        report = {
+            "diagnostic_version": "label-context-ablation-v2",
+            "status": "failed",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+        _write_report(report)
+        print(f"Diagnostic report written after failure: {REPORT_PATH}")
+        raise
 
+    _write_report(report)
     print("=== Label Integrity ===")
     for symbol, data in report["integrity"]["symbols"].items():
         print(
@@ -337,7 +377,7 @@ def main() -> None:
             f"test_precision={result['test']['precision']:.4f} "
             f"test_recall={result['test']['recall']:.4f}"
         )
-    print(f"Diagnostic report written: {output}")
+    print(f"Diagnostic report written: {REPORT_PATH}")
 
 
 if __name__ == "__main__":
