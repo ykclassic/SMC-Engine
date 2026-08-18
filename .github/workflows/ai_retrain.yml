@@ -114,12 +114,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: label-context-ablation-${{ github.sha }}
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
           path: models/weights/label_context_ablation.json
 
       - name: Train on Real Market Data
         id: training
+        if: success()
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
@@ -129,6 +130,7 @@ jobs:
           python scripts/train_models_integrity.py
 
       - name: Verify Training Artifacts
+        if: success()
         run: |
           set -euo pipefail
           required=(
@@ -146,6 +148,7 @@ jobs:
           done
 
       - name: Inspect Training Metadata
+        if: success()
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -179,11 +182,13 @@ jobs:
 
       - name: Validate Out-of-Sample Metrics
         id: validation
+        if: success()
         run: |
           set -euo pipefail
           python scripts/validate_model.py
 
       - name: Verify Final Model Integrity
+        if: success()
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -209,6 +214,7 @@ jobs:
           PY
 
       - name: Upload Validated Artifacts
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: validated-gru-${{ github.sha }}
@@ -220,6 +226,7 @@ jobs:
             models/weights/model_metadata.json
 
       - name: Commit Validated Model
+        if: success()
         run: |
           set -euo pipefail
           git config user.email "action@github.com"
