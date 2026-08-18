@@ -13,6 +13,7 @@ on:
       - "scripts/train_models_calibrated.py"
       - "scripts/train_models_calibration_diagnostic.py"
       - "scripts/train_models_integrity.py"
+      - "scripts/train_models_integrity_unweighted.py"
       - "scripts/train_models_ablation.py"
       - "scripts/validate_model.py"
       - "core/**"
@@ -135,7 +136,7 @@ jobs:
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
         run: |
           set -euo pipefail
-          python scripts/train_models_integrity.py
+          python scripts/train_models_integrity_unweighted.py
 
       - name: Verify Training Artifacts
         if: success()
@@ -171,7 +172,7 @@ jobs:
               "sequence_length", "decision_threshold", "validation", "test",
               "trained_symbols", "total_labeled_candidates", "symbol_statistics",
               "model_sha256", "scaler_sha256", "training_positive_weight",
-              "threshold_search",
+              "threshold_search", "training_loss",
           }
           missing = sorted(required.difference(metadata))
           if missing:
@@ -185,6 +186,10 @@ jobs:
               raise SystemExit(f"Invalid decision threshold: {threshold}")
           if int(metadata["total_labeled_candidates"]) <= 0:
               raise SystemExit("No labeled candidates were recorded")
+          if float(metadata["training_positive_weight"]) != 1.0:
+              raise SystemExit("Production retraining must use neutral positive_class_weight=1.0")
+          if metadata["training_loss"] != "bce":
+              raise SystemExit("Production retraining must use unweighted BCE")
           print(json.dumps(metadata, indent=2))
           PY
 
@@ -271,7 +276,7 @@ jobs:
             echo "- Commit: \`${GITHUB_SHA}\`"
             echo "- Workflow: \`${GITHUB_RUN_ID}\`"
             echo "- Status: \`${{ job.status }}\`"
-            echo "- Training: class-weighted BCE"
+            echo "- Training: neutral/unweighted BCE by default"
             echo "- Labels: keyed by (candidate_index, direction)"
             echo "- Candidate context: direction + event type"
             echo "- Ablation: diagnostic-only; report preserved on failure"
