@@ -77,6 +77,7 @@ model:
   min_confidence: 0.60
   minimum_test_auc: 0.55
   minimum_test_precision: 0.45
+  positive_class_weight: 1.0
   expected_feature_version: smc-v3
   threshold_minimum: 0.20
   threshold_maximum: 0.85
@@ -97,11 +98,6 @@ notifications:
   backoff_seconds: 2
   signal_cooldown_minutes: 30
 
-timeframes:
-  macro: 1d/4h
-  setup: 1h
-  micro: 15m
-
 discord:
   color_long: 3066993
   color_short: 15158332
@@ -111,3 +107,8 @@ journal:
 
 logging:
   level: INFO
+
+timeframes:
+  macro: 1d/4h
+  setup: 1h
+  micro: 15m
