@@ -15,6 +15,7 @@ on:
       - "scripts/train_models_integrity.py"
       - "scripts/train_models_integrity_unweighted.py"
       - "scripts/train_models_ablation.py"
+      - "scripts/diagnose_candidate_label_integrity.py"
       - "scripts/validate_model.py"
       - "core/**"
       - "models/**/*.py"
@@ -101,6 +102,25 @@ jobs:
             fi
           done
           if [[ "$missing" -ne 0 ]]; then exit 1; fi
+
+      - name: Candidate and Label Integrity Diagnostics
+        id: candidate_label_diagnostics
+        env:
+          EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
+          EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
+          EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          python scripts/diagnose_candidate_label_integrity.py
+
+      - name: Upload Candidate and Label Diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-label-integrity-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
+          path: models/weights/candidate_label_integrity.json
 
       - name: Label Integrity and Context Ablation Diagnostics
         id: ablation
@@ -279,6 +299,7 @@ jobs:
             echo "- Training: neutral/unweighted BCE by default"
             echo "- Labels: keyed by (candidate_index, direction)"
             echo "- Candidate context: direction + event type"
+            echo "- Candidate/label integrity: causal, collision, split-boundary, and separability diagnostics"
             echo "- Ablation: diagnostic-only; report preserved on failure"
             echo "- Calibration: aggregate validation threshold + chronological diagnostics"
             echo "- Test set: frozen and untouched during threshold selection"
