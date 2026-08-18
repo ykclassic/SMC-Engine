@@ -21,7 +21,11 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from models.candidate_context import CONTEXT_COLUMNS, context_vector, validate_candidate_context
+from models.candidate_context import (
+    CONTEXT_COLUMNS,
+    context_vector,
+    validate_candidate_context,
+)
 from models.feature_engineering import FEATURE_COLUMNS, FeatureEngineer
 from scripts.train_models import build_dataset, build_labeled_dataset
 from utils.config_loader import load_all_configs
@@ -58,7 +62,11 @@ class DiagnosticGRU(nn.Module):
         self.fc = nn.Linear(64, 1)
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x: torch.Tensor, context: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        context: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if x.ndim != 3 or x.shape[-1] != self.input_dim:
             raise ValueError(
                 f"Expected [batch, sequence, {self.input_dim}], got {tuple(x.shape)}"
@@ -82,17 +90,29 @@ def _seed() -> None:
 
 
 def _f1(precision: float, recall: float) -> float:
-    return 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
+    return (
+        0.0
+        if precision + recall == 0
+        else 2 * precision * recall / (precision + recall)
+    )
 
 
-def _metrics(probs: np.ndarray, truth: np.ndarray, threshold: float = 0.5) -> dict:
+def _metrics(
+    probs: np.ndarray,
+    truth: np.ndarray,
+    threshold: float = 0.5,
+) -> dict:
     from sklearn.metrics import precision_score, recall_score, roc_auc_score
 
     pred = (probs >= threshold).astype(int)
     precision = float(precision_score(truth, pred, zero_division=0))
     recall = float(recall_score(truth, pred, zero_division=0))
     return {
-        "roc_auc": float(roc_auc_score(truth, probs)) if len(np.unique(truth)) > 1 else 0.5,
+        "roc_auc": (
+            float(roc_auc_score(truth, probs))
+            if len(np.unique(truth)) > 1
+            else 0.5
+        ),
         "precision": precision,
         "recall": recall,
         "f1": _f1(precision, recall),
@@ -103,7 +123,10 @@ def _metrics(probs: np.ndarray, truth: np.ndarray, threshold: float = 0.5) -> di
 
 
 def _context(row, mode: str) -> np.ndarray:
-    full = np.asarray(context_vector(row.direction, row.event_type), dtype=np.float32)
+    full = np.asarray(
+        context_vector(row.direction, row.event_type),
+        dtype=np.float32,
+    )
     if mode == "baseline":
         return np.empty(0, dtype=np.float32)
     if mode == "direction_only":
@@ -145,9 +168,11 @@ def _make_symbol_partitions(features, labels, engineer, mode: str):
             targets.append(float(row.label))
         partitions[name] = [
             torch.tensor(np.stack(sequences), dtype=torch.float32),
-            torch.tensor(np.stack(contexts), dtype=torch.float32)
-            if contexts and contexts[0].size
-            else None,
+            (
+                torch.tensor(np.stack(contexts), dtype=torch.float32)
+                if contexts and contexts[0].size
+                else None
+            ),
             torch.tensor(np.asarray(targets)[:, None], dtype=torch.float32),
         ]
     return partitions
@@ -162,14 +187,26 @@ def _fit_mode(partitions: list[dict], mode: str) -> dict:
         "direction_plus_event": len(CONTEXT_COLUMNS),
     }[mode]
     model = DiagnosticGRU(len(FEATURE_COLUMNS), context_dim)
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    optimizer = optim.Adam(
+        model.parameters(),
+        lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY,
+    )
     criterion = nn.BCELoss(reduction="none")
 
     X_train = torch.cat([p["train"][0] for p in partitions])
-    C_train = None if context_dim == 0 else torch.cat([p["train"][1] for p in partitions])
+    C_train = (
+        None
+        if context_dim == 0
+        else torch.cat([p["train"][1] for p in partitions])
+    )
     y_train = torch.cat([p["train"][2] for p in partitions])
     X_val = torch.cat([p["validation"][0] for p in partitions])
-    C_val = None if context_dim == 0 else torch.cat([p["validation"][1] for p in partitions])
+    C_val = (
+        None
+        if context_dim == 0
+        else torch.cat([p["validation"][1] for p in partitions])
+    )
     y_val = torch.cat([p["validation"][2] for p in partitions])
 
     positive = float(y_train.sum())
@@ -203,7 +240,10 @@ def _fit_mode(partitions: list[dict], mode: str) -> dict:
         if auc > best_auc:
             best_auc = auc
             best_epoch = epoch + 1
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            best_state = {
+                k: v.detach().cpu().clone()
+                for k, v in model.state_dict().items()
+            }
 
     if best_state is None:
         raise RuntimeError(f"{mode}: no valid checkpoint")
@@ -224,7 +264,10 @@ def _fit_mode(partitions: list[dict], mode: str) -> dict:
             ]
         )
     test_truth = np.concatenate(
-        [partition["test"][2].cpu().numpy().ravel().astype(int) for partition in partitions]
+        [
+            partition["test"][2].cpu().numpy().ravel().astype(int)
+            for partition in partitions
+        ]
     )
     val_truth = y_val.cpu().numpy().ravel().astype(int)
     return {
@@ -241,17 +284,45 @@ def _integrity_report(labeled_frames: list[tuple[str, object]]) -> dict:
     report = {"symbols": {}, "population_identical_across_modes": True}
     fingerprints = []
     for symbol, labels in labeled_frames:
+        # The shared validator correctly rejects duplicate directional keys,
+        # but this diagnostic API has a stronger, historical contract: duplicate
+        # candidate identity is an integrity failure and must surface as
+        # RuntimeError. Detect it before calling the generic validator so the
+        # caller receives the documented exception type without weakening the
+        # validator's ValueError contract for malformed context.
+        duplicate_mask = labels.duplicated(
+            subset=["candidate_index", "direction"],
+            keep=False,
+        )
+        if duplicate_mask.any():
+            duplicate_rows = labels.loc[
+                duplicate_mask,
+                ["candidate_index", "direction"],
+            ].drop_duplicates()
+            raise RuntimeError(
+                f"{symbol}: duplicate (candidate_index, direction) keys: "
+                f"{duplicate_rows.to_dict(orient='records')}"
+            )
+
         validate_candidate_context(labels)
-        keys = labels[["candidate_index", "direction"]].astype({"candidate_index": int}).copy()
-        duplicate_keys = int(keys.duplicated(["candidate_index", "direction"]).sum())
-        candle_collisions = int(labels["candidate_index"].duplicated(keep=False).sum())
+        keys = labels[["candidate_index", "direction"]].astype(
+            {"candidate_index": int}
+        ).copy()
+        duplicate_keys = int(
+            keys.duplicated(["candidate_index", "direction"]).sum()
+        )
+        candle_collisions = int(
+            labels["candidate_index"].duplicated(keep=False).sum()
+        )
         directional_counts = {
             d: int((labels["direction"] == d).sum()) for d in ("LONG", "SHORT")
         }
         directional_positive_rates = {
-            d: float(labels.loc[labels["direction"] == d, "label"].mean())
-            if (labels["direction"] == d).any()
-            else 0.0
+            d: (
+                float(labels.loc[labels["direction"] == d, "label"].mean())
+                if (labels["direction"] == d).any()
+                else 0.0
+            )
             for d in ("LONG", "SHORT")
         }
         event_stats = {}
