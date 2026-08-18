@@ -153,23 +153,166 @@ def _select_threshold(
     minimum_precision: float,
     minimum_coverage: float,
 ):
-    best = None
-    for threshold in np.linspace(0.20, 0.85, 131):
-        metrics = _classification_metrics(probs, truth, float(threshold))
-        if (
-            metrics["precision"] < minimum_precision
-            or metrics["predicted_positive_rate"] < minimum_coverage
-        ):
-            continue
-        score = (_f1(metrics), float(metrics["precision"]))
-        if best is None or score > best[0]:
-            best = (score, float(threshold))
+    """Select a validation threshold and expose all gate evidence.
 
-    if best is None:
-        raise RuntimeError(
-            "No validation threshold satisfied precision and coverage constraints"
+    Threshold selection remains fail-closed. This function does not relax the
+    precision or coverage gates. When no threshold satisfies both constraints,
+    it prints enough evidence to distinguish a precision-bound failure from a
+    coverage-bound failure before the next model/calibration change is made.
+    """
+    thresholds = np.linspace(0.20, 0.85, 131)
+    rows = []
+
+    for threshold in thresholds:
+        metrics = _classification_metrics(probs, truth, float(threshold))
+        rows.append(
+            {
+                "threshold": float(threshold),
+                "precision": float(metrics["precision"]),
+                "recall": float(metrics["recall"]),
+                "f1": float(_f1(metrics)),
+                "coverage": float(metrics["predicted_positive_rate"]),
+                "roc_auc": float(metrics["roc_auc"]),
+                "samples": int(metrics["samples"]),
+            }
         )
-    return best[1], best[0][0]
+
+    precision_pass = [row for row in rows if row["precision"] >= minimum_precision]
+    coverage_pass = [row for row in rows if row["coverage"] >= minimum_coverage]
+    both_pass = [
+        row
+        for row in rows
+        if row["precision"] >= minimum_precision
+        and row["coverage"] >= minimum_coverage
+    ]
+
+    best_precision = max(
+        rows,
+        key=lambda row: (row["precision"], row["f1"], row["coverage"]),
+    )
+    best_f1 = max(
+        rows,
+        key=lambda row: (row["f1"], row["precision"], row["coverage"]),
+    )
+    best_coverage = max(
+        rows,
+        key=lambda row: (row["coverage"], row["precision"], row["f1"]),
+    )
+
+    best_coverage_with_precision = (
+        max(
+            precision_pass,
+            key=lambda row: (row["coverage"], row["precision"], row["f1"]),
+        )
+        if precision_pass
+        else None
+    )
+    best_precision_with_coverage = (
+        max(
+            coverage_pass,
+            key=lambda row: (row["precision"], row["f1"], row["coverage"]),
+        )
+        if coverage_pass
+        else None
+    )
+
+    closest = min(
+        rows,
+        key=lambda row: (
+            max(0.0, minimum_precision - row["precision"]),
+            max(0.0, minimum_coverage - row["coverage"]),
+            -row["f1"],
+        ),
+    )
+
+    print("Threshold calibration diagnostics:")
+    print(
+        f"  samples={len(truth)} positive_rate={float(np.mean(truth)):.4f} "
+        f"probability_min={float(np.min(probs)):.6f} "
+        f"probability_max={float(np.max(probs)):.6f}"
+    )
+    print(
+        f"  precision_floor={minimum_precision:.4f} "
+        f"coverage_floor={minimum_coverage:.4f} "
+        f"threshold_range=[{thresholds[0]:.4f}, {thresholds[-1]:.4f}] "
+        f"steps={len(thresholds)}"
+    )
+    print(
+        f"  thresholds_passing_precision={len(precision_pass)} "
+        f"thresholds_passing_coverage={len(coverage_pass)} "
+        f"thresholds_passing_both={len(both_pass)}"
+    )
+    print(
+        "  best_precision="
+        f"{best_precision['precision']:.4f}@{best_precision['threshold']:.4f} "
+        f"coverage={best_precision['coverage']:.4f} "
+        f"f1={best_precision['f1']:.4f}"
+    )
+    print(
+        "  best_f1="
+        f"{best_f1['f1']:.4f}@{best_f1['threshold']:.4f} "
+        f"precision={best_f1['precision']:.4f} "
+        f"coverage={best_f1['coverage']:.4f}"
+    )
+    print(
+        "  best_coverage="
+        f"{best_coverage['coverage']:.4f}@{best_coverage['threshold']:.4f} "
+        f"precision={best_coverage['precision']:.4f} "
+        f"f1={best_coverage['f1']:.4f}"
+    )
+
+    if best_coverage_with_precision is None:
+        print("  best_coverage_with_precision_floor=NONE")
+    else:
+        row = best_coverage_with_precision
+        print(
+            "  best_coverage_with_precision_floor="
+            f"{row['coverage']:.4f}@{row['threshold']:.4f} "
+            f"precision={row['precision']:.4f} f1={row['f1']:.4f}"
+        )
+
+    if best_precision_with_coverage is None:
+        print("  best_precision_with_coverage_floor=NONE")
+    else:
+        row = best_precision_with_coverage
+        print(
+            "  best_precision_with_coverage_floor="
+            f"{row['precision']:.4f}@{row['threshold']:.4f} "
+            f"coverage={row['coverage']:.4f} f1={row['f1']:.4f}"
+        )
+
+    print(
+        "  closest_threshold="
+        f"{closest['threshold']:.4f} precision={closest['precision']:.4f} "
+        f"coverage={closest['coverage']:.4f} f1={closest['f1']:.4f}"
+    )
+
+    if both_pass:
+        best = max(
+            both_pass,
+            key=lambda row: (row["f1"], row["precision"], row["coverage"]),
+        )
+        print(
+            "  selected_threshold="
+            f"{best['threshold']:.4f} precision={best['precision']:.4f} "
+            f"coverage={best['coverage']:.4f} f1={best['f1']:.4f}"
+        )
+        return best["threshold"], best["f1"]
+
+    if not precision_pass:
+        reason = "no threshold reaches the precision floor"
+    elif not coverage_pass:
+        reason = "no threshold reaches the coverage floor"
+    else:
+        reason = "precision and coverage constraints have no overlapping threshold"
+
+    raise RuntimeError(
+        "No validation threshold satisfied precision and coverage constraints; "
+        f"diagnostic_reason={reason}; "
+        f"best_precision={best_precision['precision']:.4f}@{best_precision['threshold']:.4f}; "
+        f"best_coverage={best_coverage['coverage']:.4f}@{best_coverage['threshold']:.4f}; "
+        f"best_f1={best_f1['f1']:.4f}@{best_f1['threshold']:.4f}"
+    )
 
 
 def train(config: dict) -> None:
