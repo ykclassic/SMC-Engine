@@ -13,6 +13,7 @@ on:
       - "scripts/train_models_calibrated.py"
       - "scripts/train_models_calibration_diagnostic.py"
       - "scripts/train_models_integrity.py"
+      - "scripts/train_models_ablation.py"
       - "scripts/validate_model.py"
       - "core/**"
       - "models/**/*.py"
@@ -97,6 +98,25 @@ jobs:
             fi
           done
           if [[ "$missing" -ne 0 ]]; then exit 1; fi
+
+      - name: Label Integrity and Context Ablation Diagnostics
+        id: ablation
+        env:
+          EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
+          EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
+          EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          python scripts/train_models_ablation.py
+
+      - name: Upload Label and Context Diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: label-context-ablation-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
+          path: models/weights/label_context_ablation.json
 
       - name: Train on Real Market Data
         id: training
@@ -239,6 +259,7 @@ jobs:
             echo "- Training: class-weighted BCE"
             echo "- Labels: keyed by (candidate_index, direction)"
             echo "- Candidate context: direction + event type"
+            echo "- Ablation: baseline vs direction vs event vs combined"
             echo "- Calibration: aggregate validation threshold + chronological diagnostics"
             echo "- Test set: frozen and untouched during threshold selection"
             echo "- Promotion: only after artifact, metric, and hash gates pass"
