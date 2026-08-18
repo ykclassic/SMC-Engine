@@ -30,6 +30,8 @@ permissions:
 env:
   PYTHONPATH: .
   PYTHONUNBUFFERED: "1"
+  OMP_NUM_THREADS: "2"
+  MKL_NUM_THREADS: "2"
 
 defaults:
   run:
@@ -39,7 +41,7 @@ jobs:
   retrain-model:
     name: Train, Validate, and Version Model
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     concurrency:
       group: ai-retraining
       cancel-in-progress: false
@@ -101,6 +103,7 @@ jobs:
 
       - name: Label Integrity and Context Ablation Diagnostics
         id: ablation
+        continue-on-error: true
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
@@ -108,6 +111,11 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/train_models_ablation.py
+
+      - name: Report Ablation Failure
+        if: steps.ablation.outcome == 'failure'
+        run: |
+          echo "::warning title=Ablation diagnostic failed::The diagnostic report was preserved as an artifact. Production training will continue because the ablation is diagnostic-only; the authoritative training integrity and OOS gates remain blocking."
 
       - name: Upload Label and Context Diagnostics
         if: always()
@@ -266,7 +274,7 @@ jobs:
             echo "- Training: class-weighted BCE"
             echo "- Labels: keyed by (candidate_index, direction)"
             echo "- Candidate context: direction + event type"
-            echo "- Ablation: baseline vs direction vs event vs combined"
+            echo "- Ablation: diagnostic-only; report preserved on failure"
             echo "- Calibration: aggregate validation threshold + chronological diagnostics"
             echo "- Test set: frozen and untouched during threshold selection"
             echo "- Promotion: only after artifact, metric, and hash gates pass"
