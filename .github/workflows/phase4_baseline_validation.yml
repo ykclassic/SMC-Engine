@@ -1,0 +1,176 @@
+name: Phase 4 Baseline Validation
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/run_baseline_validation.py'
+      - 'tests/test_baseline_validation.py'
+      - '.github/workflows/phase4_baseline_validation.yml'
+      - 'core/backtest.py'
+      - 'core/engine.py'
+      - 'core/confluence.py'
+      - 'core/structure.py'
+      - 'core/zones.py'
+      - 'data/exchange_api.py'
+      - 'config/settings.yaml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase4-baseline-validation
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: '3.11'
+  PYTHONUNBUFFERED: '1'
+  PYTHONPATH: '.'
+
+jobs:
+  validate:
+    name: Execute Phase 4 deterministic baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Capture Protected Phase 3 Source Hashes
+        run: |
+          set -euo pipefail
+          sha256sum \
+            core/engine.py \
+            core/confluence.py \
+            core/structure.py \
+            core/zones.py \
+            scripts/run_backtest.py \
+            > /tmp/phase3-protected.sha256
+
+      - name: Run Full Repository Tests
+        run: python -m pytest tests/ -q
+
+      - name: Run Phase 4 Validation
+        env:
+          EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
+          EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
+          EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
+        run: python scripts/run_baseline_validation.py
+
+      - name: Verify Phase 4 Artifact and Provenance
+        run: |
+          set -euo pipefail
+          test -s reports/phase4_baseline_validation.json
+          test -s reports/phase4_baseline_validation.csv
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          artifact = Path("reports/phase4_baseline_validation.json")
+          data = json.loads(artifact.read_text(encoding="utf-8"))
+
+          required_top = {
+              "schema_version",
+              "provenance",
+              "data_windows",
+              "aggregate",
+              "by_symbol",
+              "by_side",
+              "by_period",
+              "signal_count",
+              "resolved_outcome_count",
+          }
+          missing = required_top.difference(data)
+          if missing:
+              raise SystemExit(f"Missing Phase 4 artifact fields: {sorted(missing)}")
+
+          provenance = data["provenance"]
+          required_provenance = {
+              "git_sha",
+              "exchange",
+              "symbols",
+              "strategy",
+              "ai_enabled",
+              "ai_dependency",
+              "model_artifacts_required",
+              "settings_sha256",
+              "validation_script_sha256",
+          }
+          missing = required_provenance.difference(provenance)
+          if missing:
+              raise SystemExit(
+                  f"Missing Phase 4 provenance fields: {sorted(missing)}"
+              )
+
+          if provenance["git_sha"] != "${{ github.sha }}":
+              raise SystemExit(
+                  "Artifact Git SHA does not match the workflow commit: "
+                  f"{provenance['git_sha']} != ${{ github.sha }}"
+              )
+          if provenance["ai_enabled"] is not False:
+              raise SystemExit("Phase 4 must run with AI disabled")
+          if provenance["ai_dependency"] is not False:
+              raise SystemExit("Phase 4 must not depend on AI")
+          if provenance["model_artifacts_required"] is not False:
+              raise SystemExit("Phase 4 must not require model artifacts")
+          if provenance["strategy"] != "deterministic_smc":
+              raise SystemExit("Unexpected Phase 4 strategy identifier")
+
+          aggregate = data["aggregate"]
+          for key in (
+              "total_signals",
+              "resolved_trades",
+              "wins",
+              "losses",
+              "unresolved",
+              "win_rate",
+              "net_r",
+              "expectancy_r",
+              "profit_factor",
+              "max_drawdown_r",
+          ):
+              if key not in aggregate:
+                  raise SystemExit(f"Missing aggregate metric: {key}")
+
+          print("Phase 4 artifact and provenance verified")
+          print(json.dumps(data, indent=2, sort_keys=True))
+          PY
+
+      - name: Verify Phase 3 Protected Sources Are Untouched
+        run: |
+          set -euo pipefail
+          sha256sum -c /tmp/phase3-protected.sha256
+          git diff --exit-code -- \
+            core/engine.py \
+            core/confluence.py \
+            core/structure.py \
+            core/zones.py \
+            scripts/run_backtest.py
+
+      - name: Upload Phase 4 Artifacts
+        if: success()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: phase4-baseline-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            reports/phase4_baseline_validation.json
+            reports/phase4_baseline_validation.csv
