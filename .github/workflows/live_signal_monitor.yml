@@ -92,11 +92,14 @@ jobs:
             --dir models/weights
 
       - name: Verify Model Version and SHA-256 Integrity
+        env:
+          GITHUB_ENV_FILE: ${{ env.GITHUB_ENV }}
         run: |
           set -euo pipefail
           python - <<'PY'
           import hashlib
           import json
+          import os
           from pathlib import Path
 
           base = Path("models/weights")
@@ -139,7 +142,7 @@ jobs:
           print(f"Verified model version: {version}")
           print(f"Verified model SHA-256: {actual_model_hash}")
           print(f"Verified scaler SHA-256: {actual_scaler_hash}")
-          with open("$GITHUB_ENV", "a", encoding="utf-8") as env_file:
+          with open(os.environ["GITHUB_ENV_FILE"], "a", encoding="utf-8") as env_file:
               env_file.write(f"MODEL_VERSION={version}\n")
           PY
 
