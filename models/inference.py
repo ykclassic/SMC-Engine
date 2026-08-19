@@ -15,6 +15,7 @@ from models.gru import SignalValidatorGRU
 class ModelInference:
     def __init__(self, config: dict) -> None:
         model_config = config["model"]
+        self.enabled = bool(model_config.get("enabled", True))
         self.required = bool(model_config.get("required", True))
         self.model_path = Path(model_config["path"])
         self.scaler_path = Path(model_config["scaler_path"])
@@ -27,7 +28,11 @@ class ModelInference:
         self.features = FeatureEngineer(self.sequence_length)
         self.available = False
         self.model = SignalValidatorGRU(input_dim=len(FEATURE_COLUMNS)).to(self.device)
-        self._load()
+
+        if self.enabled:
+            self._load()
+        else:
+            self.logger.info("AI inference disabled; deterministic SMC mode is active")
 
     @staticmethod
     def _sha256(path: Path) -> str:
@@ -65,7 +70,7 @@ class ModelInference:
         self.logger.info("Loaded model %s with threshold %.3f", metadata.get("model_version", "unknown"), self.decision_threshold)
 
     def predict_confidence(self, df) -> float:
-        if not self.available:
+        if not self.enabled or not self.available:
             raise RuntimeError("AI model is not available")
         scaled = self.features.transform(df)
         sequence = self.features.prepare_sequence(scaled)
