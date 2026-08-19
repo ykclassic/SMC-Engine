@@ -23,6 +23,19 @@ REPORT_DIR = Path("reports")
 ARTIFACT_PATH = REPORT_DIR / "phase4_baseline_validation.json"
 RESULTS_PATH = REPORT_DIR / "phase4_baseline_validation.csv"
 
+# Phase 4 is a validation/reporting layer, not the Phase 3 baseline itself.
+# Bound the amount of history presented to the expensive SMC engine so CI cannot
+# spend unbounded time repeatedly recomputing features over growing dataframes.
+# The windows remain causal: every decision uses only rows available at cutoff.
+VALIDATION_LIMITS = {
+    "daily": 120,
+    "h4": 160,
+    "h1": 200,
+    "m15": 240,
+}
+MIN_ENGINE_CONTEXT_ROWS = 50
+EVALUATION_START_INDEX = 100
+
 
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -51,11 +64,19 @@ def _canonical_outcome(outcome: TradeOutcome) -> TradeOutcome:
 def _validation_limits(config: dict[str, Any]) -> dict[str, int]:
     configured = config["market_data"]["limits"]
     return {
-        "daily": max(500, min(int(configured["daily"]), 1000)),
-        "h4": max(500, min(int(configured["h4"]), 1000)),
-        "h1": max(500, min(int(configured["h1"]), 1000)),
-        "m15": max(1000, min(int(configured["m15"]), 1000)),
+        timeframe: min(int(configured[timeframe]), limit)
+        for timeframe, limit in VALIDATION_LIMITS.items()
     }
+
+
+def _causal_slice(
+    frame: pd.DataFrame,
+    cutoff: Any,
+    max_rows: int,
+) -> pd.DataFrame:
+    """Return a bounded, time-causal context ending at ``cutoff``."""
+    eligible = frame.loc[frame["timestamp"] <= cutoff]
+    return eligible.tail(max_rows)
 
 
 def _run_symbol(
@@ -76,14 +97,19 @@ def _run_symbol(
     outcomes: list[TradeOutcome] = []
     signal_rows: list[dict[str, Any]] = []
 
-    for index in range(100, len(m15)):
-        cutoff = m15.iloc[index]["timestamp"]
-        daily_slice = daily[daily["timestamp"] <= cutoff]
-        h4_slice = h4[h4["timestamp"] <= cutoff]
-        h1_slice = h1[h1["timestamp"] <= cutoff]
-        m15_slice = m15.iloc[:index]
+    if len(m15) <= EVALUATION_START_INDEX:
+        evaluation_start = len(m15)
+    else:
+        evaluation_start = EVALUATION_START_INDEX
 
-        if min(map(len, (daily_slice, h4_slice, h1_slice, m15_slice))) < 50:
+    for index in range(evaluation_start, len(m15)):
+        cutoff = m15.iloc[index]["timestamp"]
+        daily_slice = _causal_slice(daily, cutoff, VALIDATION_LIMITS["daily"])
+        h4_slice = _causal_slice(h4, cutoff, VALIDATION_LIMITS["h4"])
+        h1_slice = _causal_slice(h1, cutoff, VALIDATION_LIMITS["h1"])
+        m15_slice = m15.iloc[:index].tail(VALIDATION_LIMITS["m15"])
+
+        if min(map(len, (daily_slice, h4_slice, h1_slice, m15_slice))) < MIN_ENGINE_CONTEXT_ROWS:
             continue
 
         signal, diagnostic, *_ = engine.process_market(
@@ -125,12 +151,22 @@ def _run_symbol(
         "h1_end": h1["timestamp"].max().isoformat() if not h1.empty else None,
         "m15_start": m15["timestamp"].min().isoformat() if not m15.empty else None,
         "m15_end": m15["timestamp"].max().isoformat() if not m15.empty else None,
+        "evaluation_m15_start": (
+            m15.iloc[evaluation_start]["timestamp"].isoformat()
+            if evaluation_start < len(m15)
+            else None
+        ),
+        "evaluation_m15_end": (
+            m15.iloc[-1]["timestamp"].isoformat() if not m15.empty else None
+        ),
+        "evaluation_candidates": max(0, len(m15) - evaluation_start),
         "rows": {
             "daily": len(daily),
             "h4": len(h4),
             "h1": len(h1),
             "m15": len(m15),
         },
+        "validation_limits": limits,
     }
     return outcomes, signal_rows, data_window
 
@@ -152,20 +188,17 @@ def _provenance(config: dict[str, Any]) -> dict[str, Any]:
         "ai_enabled": False,
         "ai_dependency": False,
         "model_artifacts_required": False,
+        "validation_policy": "bounded_causal_window",
+        "validation_limits": dict(VALIDATION_LIMITS),
+        "evaluation_start_index": EVALUATION_START_INDEX,
+        "minimum_engine_context_rows": MIN_ENGINE_CONTEXT_ROWS,
         "settings_sha256": _sha256_file(settings_path),
         "validation_script_sha256": _sha256_file(Path(__file__)),
     }
 
 
 def _json_safe_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
-    """Make performance metrics strict-JSON compatible without changing core math.
-
-    ``calculate_performance`` intentionally represents an undefined profit factor
-    as positive infinity when there is profit but no loss. JSON has no Infinity
-    value, so the Phase 4 artifact records that undefined statistic as ``null``.
-    This keeps the reporting boundary strict while leaving the Phase 3 performance
-    implementation untouched.
-    """
+    """Make performance metrics strict-JSON compatible without changing core math."""
     safe: dict[str, Any] = {}
     for key, value in metrics.items():
         if isinstance(value, float) and not isfinite(value):
