@@ -40,8 +40,8 @@ def make_frame(rows: int = 90) -> pd.DataFrame:
     )
 
     frame.loc[20, "fvg"] = "BULLISH_FVG"
-    frame.loc[20, "fvg_top"] = close[20] + 0.20
-    frame.loc[20, "fvg_bottom"] = close[20] + 0.05
+    frame.loc[20, "fvg_top"] = close[20] - 0.12
+    frame.loc[20, "fvg_bottom"] = close[20] - 0.18
 
     frame.loc[30, "ob_event"] = "BULLISH_OB"
     frame.loc[30, "ob_origin_index"] = 25
