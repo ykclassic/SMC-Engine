@@ -2,46 +2,69 @@ name: Weekly Strategy Backtest
 
 on:
   schedule:
-    - cron: '0 12 * * 0' # Every Sunday at Noon
-  workflow_dispatch: # Manual trigger
+    - cron: '0 12 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-strategy-backtest
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: '3.11'
+  PYTHONUNBUFFERED: '1'
+  PYTHONPATH: '.'
 
 jobs:
   run-backtest:
+    name: Validate and Execute Backtest
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
-          python-version: '3.9'
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
+          cache-dependency-path: requirements.txt
 
       - name: Install Dependencies
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
 
       - name: Verify Package Structures
         run: |
-          # Anti-pattern fix: Alert the developer if __init__ files are missing in Git, 
-          # but dynamically create them so the current run can proceed.
-          for dir in core models utils data; do
-            if [ ! -f "$dir/__init__.py" ]; then
-              echo "Warning: $dir/__init__.py is missing from Git. Creating it dynamically for this run."
-              touch "$dir/__init__.py"
+          set -euo pipefail
+          required_files=(
+            "core/__init__.py"
+            "models/__init__.py"
+            "utils/__init__.py"
+            "data/__init__.py"
+          )
+          for path in "${required_files[@]}"; do
+            if [[ ! -f "$path" ]]; then
+              echo "::error title=Repository integrity failure::$path is missing"
+              exit 1
             fi
           done
 
       - name: Diagnostic Forensic Check - Inspect structure.py
         run: |
+          set -euo pipefail
           echo "--- Searching for SMCEngine in core/structure.py ---"
           if grep -q "class SMCEngine" core/structure.py; then
-            echo "SUCCESS: SMCEngine class found in file. This indicates a Circular Import bug."
-          else
-            echo "ERROR: SMCEngine class is completely missing. You forgot to push the updated file."
+            echo "ERROR: SMCEngine class found in core/structure.py; review for circular import risk."
+            exit 1
           fi
+          echo "SUCCESS: SMCEngine class is not defined in core/structure.py."
           echo "--- File Preview (First 15 lines) ---"
           head -n 15 core/structure.py
 
@@ -51,12 +74,14 @@ jobs:
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          PYTHONPATH: . 
+          EXCHANGE: xt
         run: python scripts/run_backtest.py
 
       - name: Upload Results Artifact
-        if: success() # Only upload if the backtest execution actually succeeded
-        uses: actions/upload-artifact@v4
+        if: success()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
-          name: backtest-report
+          name: backtest-report-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
           path: reports/backtest_results.csv
