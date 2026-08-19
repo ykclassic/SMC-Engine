@@ -13,6 +13,7 @@ env:
   PYTHONUNBUFFERED: "1"
   PYTHONPATH: "."
   EXCHANGE: "bitget"
+  SMC_AI_ENABLED: "false"
 
 concurrency:
   group: smc-live-signal-monitor
@@ -104,10 +105,15 @@ jobs:
           if violations:
               raise SystemExit("AI imports detected in production path:\n" + "\n".join(violations))
 
-          print("Deterministic production boundary verified: no AI model artifact or forbidden AI runtime import")
+          print("Deterministic production boundary verified: no eager AI runtime import")
           PY
 
       - name: Verify Bitget Production Configuration
+        env:
+          EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
+          EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
+          EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           set -euo pipefail
           if [[ "${EXCHANGE}" != "bitget" ]]; then
@@ -119,15 +125,21 @@ jobs:
           from utils.config_loader import load_all_configs
 
           config = load_all_configs()
-          if str(config.get("exchange", {}).get("name", "bitget")).lower() != "bitget":
+          if str(config.get("trading", {}).get("exchange", "")).lower() != "bitget":
               raise SystemExit("Production exchange configuration is not Bitget")
+          if config.get("model", {}).get("enabled") is not False:
+              raise SystemExit("Production AI boundary is not disabled")
+          if config.get("model", {}).get("required") is not False:
+              raise SystemExit("Production model artifacts remain required")
 
           symbols = config.get("trading", {}).get("symbols", [])
           if not symbols:
               raise SystemExit("No production trading symbols configured")
 
-          print(f"Verified production exchange: bitget")
+          print("Verified production exchange: bitget")
           print(f"Verified production symbols: {symbols}")
+          print("Verified production AI mode: disabled")
+          print("Verified production model requirement: false")
           PY
 
       - name: Run Deterministic Signal Engine
