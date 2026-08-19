@@ -40,20 +40,15 @@ EVENT_COLUMNS = (
 
 
 class SMCTrainingEventBuilder:
-    """Build causal SMC candidates for supervised model training.
+    """Build causal SMC candidates with label-aware bounded recovery.
 
-    Recovery has two layers:
-
-    1. ``build()`` performs structural recovery when the configured recovery
-       target cannot be reached with the current candidate capacity. This keeps
-       the builder's recovery state deterministic and makes sparse-data behavior
-       observable without weakening the label-quality gate.
-    2. ``train_models.py`` remains the authoritative label-aware controller. It
-       validates actual TP/SL labels and calls ``expand_capacity()`` when the
-       hard labeled-candidate minimum is still unmet.
-
-    Every recovery limit is bounded by the available frame length, so recovery
-    can never request observations beyond the causal data that exists.
+    Normal candidate generation uses the configured continuation window,
+    spacing, and per-event cap. Recovery is deliberately *not* activated merely
+    because a minimum label target exists. The caller must first label the
+    normal candidate set and invoke ``expand_capacity`` only when the hard
+    labeled-candidate floor is actually unmet. This prevents millions of
+    speculative raw candidates from being generated when the normal candidate
+    set already contains enough usable labels.
     """
 
     def __init__(self, config: dict) -> None:
@@ -76,18 +71,13 @@ class SMCTrainingEventBuilder:
         self.recovery_enabled = minimum_labeled_value is not None
         self.minimum_labeled_candidates = max(
             1,
-            int(
-                minimum_labeled_value
-                if minimum_labeled_value is not None
-                else 1
-            ),
+            int(minimum_labeled_value) if minimum_labeled_value is not None else 1,
         )
 
         self.label_horizon = max(
             0,
             int(model.get("label_horizon", 20)),
         )
-
         self.recovery_window = max(
             self.window,
             int(training.get("recovery_continuation_window", 512)),
@@ -118,47 +108,33 @@ class SMCTrainingEventBuilder:
             int(training.get("recovery_candidate_buffer", 64)),
         )
 
-        # Recovery state is shared between structural pre-recovery in build()
-        # and label-aware recovery driven by train_models.py.
         self.recovery_mode = False
         self.recovery_iterations = 0
         self.recovery_capacity_limited = False
-
         self.current_window = self.window
         self.current_spacing = self.min_spacing
         self.current_max_candidates_per_event = self.max_candidates_per_event
         self._last_frame_length = 0
-
         self.last_build_stats: dict = {}
         self.last_label_stats: dict = {}
 
     @staticmethod
     def _events_at(row: pd.Series) -> list[tuple[str, int]]:
-        """Return every confirmed event on a candle, preserving event order."""
-
         events: list[tuple[str, int]] = []
-
         for column in EVENT_COLUMNS:
             value = row.get(column)
             if value in EVENT_DIRECTIONS:
                 event_type = str(value)
                 events.append((event_type, EVENT_DIRECTIONS[event_type]))
-
         return events
 
     @classmethod
     def _event_at(cls, row: pd.Series) -> tuple[str | None, int]:
-        """Return the first confirmed event for backward-compatible callers."""
-
         events = cls._events_at(row)
-        if not events:
-            return None, 0
-        return events[0]
+        return events[0] if events else (None, 0)
 
     @staticmethod
     def _direction_name(direction: int) -> str:
-        """Convert the internal event sign to the canonical public label."""
-
         if direction > 0:
             return "LONG"
         if direction < 0:
@@ -166,18 +142,13 @@ class SMCTrainingEventBuilder:
         raise ValueError(f"Unsupported training direction: {direction}")
 
     @staticmethod
-    def _unique_candidates(
-        candidates: list[TrainingCandidate],
-    ) -> pd.DataFrame:
-        """Convert candidates to the canonical deduplicated DataFrame."""
-
+    def _unique_candidates(candidates: list[TrainingCandidate]) -> pd.DataFrame:
         columns = [
             "candidate_index",
             "direction",
             "event_type",
             "distance_from_event",
         ]
-
         if not candidates:
             return pd.DataFrame(columns=columns)
 
@@ -193,7 +164,6 @@ class SMCTrainingEventBuilder:
             ],
             columns=columns,
         )
-
         return (
             result.sort_values(
                 ["candidate_index", "direction"],
@@ -202,10 +172,6 @@ class SMCTrainingEventBuilder:
             .drop_duplicates(
                 subset=["candidate_index", "direction"],
                 keep="first",
-            )
-            .sort_values(
-                ["candidate_index", "direction"],
-                kind="stable",
             )
             .reset_index(drop=True)
         )
@@ -218,23 +184,16 @@ class SMCTrainingEventBuilder:
         spacing: int,
         max_candidates_per_event: int,
     ) -> list[TrainingCandidate]:
-        """Emit causal continuation observations using explicit constraints."""
-
         candidates: list[TrainingCandidate] = []
-
         for event_index, event_type, direction in event_indices:
             emitted = 0
             last_candidate_index = -10**9
-
             for distance in range(window + 1):
                 candidate_index = event_index + distance
-
                 if candidate_index >= len(frame):
                     break
-
                 if candidate_index < last_candidate_index + spacing:
                     continue
-
                 candidates.append(
                     TrainingCandidate(
                         candidate_index=candidate_index,
@@ -243,18 +202,13 @@ class SMCTrainingEventBuilder:
                         distance_from_event=distance,
                     )
                 )
-
                 last_candidate_index = candidate_index
                 emitted += 1
-
                 if emitted >= max_candidates_per_event:
                     break
-
         return candidates
 
     def _recovery_target_candidates(self) -> int:
-        """Return the raw-candidate target used to protect the label floor."""
-
         return (
             self.minimum_labeled_candidates
             + self.label_horizon
@@ -262,8 +216,6 @@ class SMCTrainingEventBuilder:
         )
 
     def recovery_needed(self, labeled_count: int) -> bool:
-        """Return whether the hard labeled-candidate floor is still unmet."""
-
         return (
             self.recovery_enabled
             and int(labeled_count) < self.minimum_labeled_candidates
@@ -271,14 +223,10 @@ class SMCTrainingEventBuilder:
 
     @staticmethod
     def _frame_window_limit(frame_length: int) -> int:
-        """Return the largest valid continuation distance for a frame."""
-
         return max(0, int(frame_length) - 1)
 
     @staticmethod
     def _frame_candidate_limit(frame_length: int) -> int:
-        """Return the largest possible per-event candidate count."""
-
         return max(0, int(frame_length))
 
     def _next_recovery_limits(
@@ -287,22 +235,13 @@ class SMCTrainingEventBuilder:
         max_candidates_per_event: int,
         frame_length: int | None = None,
     ) -> tuple[int, int]:
-        """Grow recovery limits while respecting configured and frame bounds.
-
-        ``frame_length`` is optional for backward compatibility. When omitted,
-        the most recently built frame length is used. Passing it explicitly is
-        preferred for deterministic controller tests and new callers.
-        """
-
         effective_frame_length = (
             self._last_frame_length
             if frame_length is None
             else max(0, int(frame_length))
         )
-
         frame_window_limit = self._frame_window_limit(effective_frame_length)
         frame_candidate_limit = self._frame_candidate_limit(effective_frame_length)
-
         next_window = min(
             self.recovery_max_window,
             frame_window_limit,
@@ -319,12 +258,10 @@ class SMCTrainingEventBuilder:
                 int(max_candidates_per_event) * self.recovery_growth_factor,
             ),
         )
-
         return max(0, next_window), max(0, next_max)
 
     def expand_capacity(self, frame_length: int | None = None) -> None:
-        """Expand candidate capacity for structural or label-aware recovery."""
-
+        """Expand recovery capacity only after the label floor is unmet."""
         if not self.recovery_enabled:
             return
 
@@ -333,13 +270,11 @@ class SMCTrainingEventBuilder:
             if frame_length is None
             else max(0, int(frame_length))
         )
-
         if effective_frame_length:
             self._last_frame_length = effective_frame_length
 
         frame_window_limit = self._frame_window_limit(self._last_frame_length)
         frame_candidate_limit = self._frame_candidate_limit(self._last_frame_length)
-
         self.recovery_iterations += 1
         self.recovery_mode = True
 
@@ -362,13 +297,11 @@ class SMCTrainingEventBuilder:
                 self.current_max_candidates_per_event,
                 frame_length=self._last_frame_length,
             )
-
             if (
                 next_window == self.current_window
                 and next_max == self.current_max_candidates_per_event
             ):
                 self.recovery_capacity_limited = True
-
             self.current_window = next_window
             self.current_max_candidates_per_event = next_max
 
@@ -384,8 +317,6 @@ class SMCTrainingEventBuilder:
         frame: pd.DataFrame,
         event_indices: list[tuple[int, str, int]],
     ) -> tuple[list[TrainingCandidate], pd.DataFrame]:
-        """Emit and canonicalize candidates for the current recovery state."""
-
         candidates = self._emit_candidates(
             frame,
             event_indices,
@@ -396,15 +327,13 @@ class SMCTrainingEventBuilder:
         return candidates, self._unique_candidates(candidates)
 
     def build(self, frame: pd.DataFrame) -> pd.DataFrame:
-        """Build causal candidates, using structural recovery when enabled."""
-
+        """Build normal candidates; recovery is activated by the label loop."""
         columns = [
             "candidate_index",
             "direction",
             "event_type",
             "distance_from_event",
         ]
-
         self._last_frame_length = len(frame)
 
         if frame.empty:
@@ -415,7 +344,10 @@ class SMCTrainingEventBuilder:
                 "raw_candidates": 0,
                 "unique_candidates": 0,
                 "candidate_deduplication": 0,
-                "target_candidates": 0,
+                "deduplication_rate": 0.0,
+                "target_candidates": self._recovery_target_candidates()
+                if self.recovery_enabled
+                else 0,
                 "recovery_mode": self.recovery_mode,
                 "recovery_enabled": self.recovery_enabled,
                 "recovery_window": self.current_window,
@@ -423,12 +355,13 @@ class SMCTrainingEventBuilder:
                 "recovery_max_candidates_per_event": self.current_max_candidates_per_event,
                 "recovery_iterations": self.recovery_iterations,
                 "recovery_capacity_limited": self.recovery_capacity_limited,
+                "direction_counts": {},
+                "event_type_counts": {},
             }
             return pd.DataFrame(columns=columns)
 
         event_indices: list[tuple[int, str, int]] = []
         event_counts: Counter[str] = Counter()
-
         for index in range(len(frame)):
             for event_type, direction in self._events_at(frame.iloc[index]):
                 event_indices.append((index, event_type, direction))
@@ -448,6 +381,7 @@ class SMCTrainingEventBuilder:
                 "raw_candidates": 0,
                 "unique_candidates": 0,
                 "candidate_deduplication": 0,
+                "deduplication_rate": 0.0,
                 "target_candidates": int(target_candidates),
                 "recovery_mode": self.recovery_mode,
                 "recovery_enabled": self.recovery_enabled,
@@ -456,52 +390,35 @@ class SMCTrainingEventBuilder:
                 "recovery_max_candidates_per_event": int(self.current_max_candidates_per_event),
                 "recovery_iterations": self.recovery_iterations,
                 "recovery_capacity_limited": self.recovery_capacity_limited,
+                "direction_counts": {},
+                "event_type_counts": {},
             }
             return pd.DataFrame(columns=columns)
-
-        # Structural recovery establishes the candidate budget. The downstream
-        # train_models.py loop still performs the authoritative label-aware
-        # recovery after TP/SL labeling.
-        if self.recovery_enabled and not self.recovery_mode:
-            self.expand_capacity(frame_length=len(frame))
 
         candidates, result = self._build_candidates_for_current_state(
             frame,
             event_indices,
         )
-
-        while (
-            self.recovery_enabled
-            and len(result) < target_candidates
-            and not self.recovery_capacity_limited
-        ):
-            previous_signature = (
-                self.current_window,
-                self.current_max_candidates_per_event,
-            )
-            self.expand_capacity(frame_length=len(frame))
-            current_signature = (
-                self.current_window,
-                self.current_max_candidates_per_event,
-            )
-
-            if current_signature == previous_signature:
-                break
-
-            candidates, result = self._build_candidates_for_current_state(
-                frame,
-                event_indices,
-            )
-
         raw_candidate_count = len(candidates)
-
+        duplicate_count = raw_candidate_count - len(result)
+        direction_counts = {
+            str(key): int(value)
+            for key, value in result["direction"].value_counts().sort_index().items()
+        }
+        event_type_counts = {
+            str(key): int(value)
+            for key, value in result["event_type"].value_counts().sort_index().items()
+        }
         self.last_build_stats = {
             "rows": int(len(frame)),
             "event_count": int(len(event_indices)),
             "event_counts": dict(sorted(event_counts.items())),
             "raw_candidates": int(raw_candidate_count),
             "unique_candidates": int(len(result)),
-            "candidate_deduplication": int(raw_candidate_count - len(result)),
+            "candidate_deduplication": int(duplicate_count),
+            "deduplication_rate": float(
+                duplicate_count / raw_candidate_count
+            ) if raw_candidate_count else 0.0,
             "target_candidates": int(target_candidates),
             "recovery_mode": self.recovery_mode,
             "recovery_enabled": self.recovery_enabled,
@@ -510,8 +427,9 @@ class SMCTrainingEventBuilder:
             "recovery_max_candidates_per_event": int(self.current_max_candidates_per_event),
             "recovery_iterations": int(self.recovery_iterations),
             "recovery_capacity_limited": self.recovery_capacity_limited,
+            "direction_counts": direction_counts,
+            "event_type_counts": event_type_counts,
         }
-
         print(
             "SMC training events: "
             f"events={len(event_indices)} "
@@ -523,11 +441,10 @@ class SMCTrainingEventBuilder:
             f"recovery_capacity_limited={self.recovery_capacity_limited} "
             f"event_counts={dict(sorted(event_counts.items()))}"
         )
-
         return result
 
-    @staticmethod
     def label_candidates(
+        self,
         frame: pd.DataFrame,
         candidates: pd.DataFrame,
         atr: pd.Series,
@@ -536,7 +453,6 @@ class SMCTrainingEventBuilder:
         horizon: int,
     ) -> pd.DataFrame:
         """Label candidates by TP-before-SL within the forward horizon."""
-
         rows: list[dict] = []
         skipped_horizon = 0
         skipped_atr = 0
@@ -544,7 +460,6 @@ class SMCTrainingEventBuilder:
 
         for candidate in candidates.itertuples(index=False):
             index = int(candidate.candidate_index)
-
             if index + horizon >= len(frame):
                 skipped_horizon += 1
                 continue
@@ -561,15 +476,13 @@ class SMCTrainingEventBuilder:
                 direction = -1
             else:
                 raise ValueError(
-                    "Unsupported training candidate direction: "
-                    f"{candidate.direction!r}"
+                    f"Unsupported training candidate direction: {candidate.direction!r}"
                 )
 
             entry = float(frame.iloc[index]["close"])
             risk = atr_value * float(sl_multiplier)
             stop = entry - direction * risk
             target = entry + direction * risk * float(rr)
-
             future = frame.iloc[index + 1 : index + horizon + 1]
 
             if direction > 0:
@@ -581,18 +494,12 @@ class SMCTrainingEventBuilder:
 
             target_hits = np.flatnonzero(hit_target.to_numpy())
             stop_hits = np.flatnonzero(hit_stop.to_numpy())
-
             target_first = (
                 target_hits.size > 0
-                and (
-                    not stop_hits.size
-                    or target_hits[0] < stop_hits[0]
-                )
+                and (not stop_hits.size or target_hits[0] < stop_hits[0])
             )
-
             label = 1.0 if target_first else 0.0
             positive_labels += int(label == 1.0)
-
             rows.append(
                 {
                     "candidate_index": index,
@@ -604,21 +511,42 @@ class SMCTrainingEventBuilder:
             )
 
         result = pd.DataFrame(rows)
-        SMCTrainingEventBuilder._record_label_stats(
-            result,
-            skipped_horizon,
-            skipped_atr,
-            positive_labels,
+        total = len(result)
+        self.last_label_stats = {
+            "candidate_rows": int(len(candidates)),
+            "labeled_rows": int(total),
+            "positive_labels": int(positive_labels),
+            "negative_labels": int(total - positive_labels),
+            "positive_rate": float(positive_labels / total) if total else 0.0,
+            "skipped_horizon": int(skipped_horizon),
+            "skipped_atr": int(skipped_atr),
+            "label_efficiency": float(total / len(candidates)) if len(candidates) else 0.0,
+            "direction_counts": {
+                str(key): int(value)
+                for key, value in result["direction"].value_counts().sort_index().items()
+            } if not result.empty else {},
+            "event_type_counts": {
+                str(key): int(value)
+                for key, value in result["event_type"].value_counts().sort_index().items()
+            } if not result.empty else {},
+            "positive_rate_by_direction": {
+                str(key): float(group["label"].mean())
+                for key, group in result.groupby("direction", sort=True)
+            } if not result.empty else {},
+            "positive_rate_by_event_type": {
+                str(key): float(group["label"].mean())
+                for key, group in result.groupby("event_type", sort=True)
+            } if not result.empty else {},
+        }
+        print(
+            "SMC label distribution: "
+            f"candidate_rows={len(candidates)} "
+            f"labeled_rows={total} "
+            f"positive={positive_labels} "
+            f"negative={total - positive_labels} "
+            f"positive_rate={self.last_label_stats['positive_rate']:.4f} "
+            f"skipped_horizon={skipped_horizon} "
+            f"skipped_atr={skipped_atr} "
+            f"label_efficiency={self.last_label_stats['label_efficiency']:.4f}"
         )
         return result
-
-    @staticmethod
-    def _record_label_stats(
-        result: pd.DataFrame,
-        skipped_horizon: int,
-        skipped_atr: int,
-        positive_labels: int,
-    ) -> None:
-        """Compatibility hook retained for callers that inspect label output only."""
-
-        _ = result, skipped_horizon, skipped_atr, positive_labels
