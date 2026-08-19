@@ -82,7 +82,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts/feature_ablation
-          python scripts/ablation_feature_groups.py \
+          python -m scripts.ablation_feature_groups \
             --epochs "${ABLATION_EPOCHS}" \
             --seed "${ABLATION_SEED}" \
             --output artifacts/feature_ablation/ablation_results.json
