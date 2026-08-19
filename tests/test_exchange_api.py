@@ -77,8 +77,12 @@ class IncompleteBitget(FakeBitget):
             }
         )
         until = (params or {}).get("until")
+        # Return the same single candle on every request. This models an
+        # exchange that cannot provide any additional historical data and
+        # allows the adapter's no-progress invariant to fail closed.
+        timestamp = 1_700_000_000_000
         return [
-            [until - 900_000, 100.0, 101.0, 99.0, 100.5, 10.0],
+            [timestamp, 100.0, 101.0, 99.0, 100.5, 10.0],
         ]
 
 
@@ -87,7 +91,7 @@ def test_history_fails_closed_when_exchange_cannot_supply_requested_history():
     interface.logger = logging.getLogger("test")
     interface.exchange = IncompleteBitget()
 
-    with pytest.raises(RuntimeError, match="Incomplete closed-candle history"):
+    with pytest.raises(RuntimeError, match="Incomplete closed-candle history|no new candles"):
         interface.fetch_ohlcv_history(
             "BTC/USDT:USDT",
             "15m",
