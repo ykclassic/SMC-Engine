@@ -39,7 +39,6 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
-      actions: write
 
     steps:
       - name: Checkout repository
@@ -58,7 +57,9 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          if [[ -f requirements.txt ]]; then
+          if [[ -f requirements-train.txt ]]; then
+            python -m pip install -r requirements-train.txt
+          elif [[ -f requirements.txt ]]; then
             python -m pip install -r requirements.txt
           elif [[ -f pyproject.toml ]]; then
             python -m pip install .
@@ -108,10 +109,36 @@ jobs:
           missing = required.difference(payload)
           if missing:
               raise SystemExit(f"Ablation report missing keys: {sorted(missing)}")
+          if payload.get("schema_version") != "smc-feature-ablation-v1":
+              raise SystemExit(
+                  f"Unexpected ablation schema: {payload.get('schema_version')!r}"
+              )
+          if payload.get("selection_policy") != "validation_only_then_single_test_evaluation":
+              raise SystemExit("Ablation selection policy is not test-set isolated")
           if len(payload["experiments"]) != 5:
               raise SystemExit(
                   f"Expected 5 ablation experiments, got {len(payload['experiments'])}"
               )
+          names = [row.get("experiment") for row in payload["experiments"]]
+          expected = [
+              "baseline",
+              "baseline_plus_geometry",
+              "baseline_plus_geometry_liquidity",
+              "baseline_plus_geometry_liquidity_regime",
+              "full_smc_v4",
+          ]
+          if names != expected:
+              raise SystemExit(
+                  f"Unexpected ablation order/matrix: expected={expected!r} got={names!r}"
+              )
+          if payload["validation_winner"] not in expected:
+              raise SystemExit(
+                  f"Invalid validation winner: {payload['validation_winner']!r}"
+              )
+          selected_test = payload["selected_test_metrics"]
+          for metric in ("roc_auc", "precision", "recall", "f1", "coverage"):
+              if metric not in selected_test:
+                  raise SystemExit(f"Selected test metrics missing {metric!r}")
           print(json.dumps(payload, indent=2, sort_keys=True))
           PY
 
