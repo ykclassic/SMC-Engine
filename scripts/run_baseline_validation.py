@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from dataclasses import replace
+from math import isfinite
 from pathlib import Path
 from typing import Any, Callable
 
@@ -156,6 +157,24 @@ def _provenance(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _json_safe_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Make performance metrics strict-JSON compatible without changing core math.
+
+    ``calculate_performance`` intentionally represents an undefined profit factor
+    as positive infinity when there is profit but no loss. JSON has no Infinity
+    value, so the Phase 4 artifact records that undefined statistic as ``null``.
+    This keeps the reporting boundary strict while leaving the Phase 3 performance
+    implementation untouched.
+    """
+    safe: dict[str, Any] = {}
+    for key, value in metrics.items():
+        if isinstance(value, float) and not isfinite(value):
+            safe[key] = None
+        else:
+            safe[key] = value
+    return safe
+
+
 def _aggregate_by_key(
     outcomes: list[TradeOutcome],
     key: Callable[[TradeOutcome], str],
@@ -163,7 +182,10 @@ def _aggregate_by_key(
     groups: dict[str, list[TradeOutcome]] = {}
     for outcome in outcomes:
         groups.setdefault(key(outcome), []).append(outcome)
-    return {name: calculate_performance(rows) for name, rows in sorted(groups.items())}
+    return {
+        name: _json_safe_metrics(calculate_performance(rows))
+        for name, rows in sorted(groups.items())
+    }
 
 
 def _period_key(outcome: TradeOutcome) -> str:
@@ -177,7 +199,7 @@ def build_report(
     signal_rows: list[dict[str, Any]],
     data_windows: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    aggregate = calculate_performance(outcomes)
+    aggregate = _json_safe_metrics(calculate_performance(outcomes))
     aggregate.update(
         {
             "strategy": "deterministic_smc",
