@@ -23,6 +23,18 @@ FALLBACK_EXCHANGE_SECRETS = {
 NOTIFICATION_SECRETS = {"DISCORD_WEBHOOK_URL": "discord_webhook_url"}
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
+
+
 def load_all_configs(
     require_secrets: bool = True,
     require_notifications: bool = True,
@@ -59,6 +71,13 @@ def load_all_configs(
 
     for env_name, key in NOTIFICATION_SECRETS.items():
         config[key] = os.getenv(env_name)
+
+    config["model"]["enabled"] = _env_bool(
+        "SMC_AI_ENABLED",
+        bool(config["model"].get("enabled", False)),
+    )
+    if not config["model"]["enabled"]:
+        config["model"]["required"] = False
 
     required = {}
 
@@ -129,11 +148,12 @@ def load_all_configs(
 
     logger.info(
         "Configuration loaded: primary exchange=%s, fallback exchange=%s, "
-        "fallback_enabled=%s, fallback_credentials=%s.",
+        "fallback_enabled=%s, fallback_credentials=%s, ai_enabled=%s.",
         primary,
         fallback,
         config["trading"]["fallback_exchange_enabled"],
         fallback_configured,
+        config["model"]["enabled"],
     )
 
     return config
