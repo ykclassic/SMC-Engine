@@ -68,9 +68,11 @@ confluence:
     m15_sweep: 0.20
     m15_confirmation: 0.20
 
+# AI is an optional enhancement. The deterministic SMC engine remains the
+# authoritative live signal path until AI has a validated production baseline.
 model:
-  enabled: true
-  required: true
+  enabled: false
+  required: false
   path: models/weights/latest_gru.pth
   scaler_path: models/weights/feature_scaler.joblib
   metadata_path: models/weights/model_metadata.json
