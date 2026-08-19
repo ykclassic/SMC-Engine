@@ -85,9 +85,22 @@ def load_all_configs(
         for name in FALLBACK_EXCHANGE_SECRETS
     )
 
+    configured_fallback_enabled = bool(
+        config["trading"].get(
+            "fallback_exchange_enabled",
+            False,
+        )
+    )
+
+    if configured_fallback_enabled and not fallback_configured:
+        raise EnvironmentError(
+            "trading.fallback_exchange_enabled is true, but XT_API_KEY, "
+            "XT_API_SECRET, and XT_PASSPHRASE are not all configured"
+        )
+
     config["trading"]["fallback_exchange_enabled"] = (
-        fallback_configured
-        or config["trading"].get("fallback_exchange") == "xt"
+        configured_fallback_enabled
+        and fallback_configured
     )
 
     if not config["trading"].get("symbols"):
@@ -115,9 +128,11 @@ def load_all_configs(
         )
 
     logger.info(
-        "Configuration loaded: primary exchange=%s, fallback exchange=%s, fallback_credentials=%s.",
+        "Configuration loaded: primary exchange=%s, fallback exchange=%s, "
+        "fallback_enabled=%s, fallback_credentials=%s.",
         primary,
         fallback,
+        config["trading"]["fallback_exchange_enabled"],
         fallback_configured,
     )
 
