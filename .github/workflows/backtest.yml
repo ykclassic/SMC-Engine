@@ -49,6 +49,8 @@ jobs:
             "models/__init__.py"
             "utils/__init__.py"
             "data/__init__.py"
+            "core/backtest.py"
+            "tests/test_backtest.py"
           )
           for path in "${required_files[@]}"; do
             if [[ ! -f "$path" ]]; then
@@ -56,6 +58,9 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Run Backtest Unit Tests
+        run: python -m pytest tests/test_backtest.py -q
 
       - name: Diagnostic Forensic Check - Inspect structure.py
         run: |
@@ -77,6 +82,35 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python scripts/run_backtest.py
 
+      - name: Verify Baseline Artifact
+        run: |
+          set -euo pipefail
+          test -s reports/backtest_results.csv
+          test -s reports/backtest_baseline.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path("reports/backtest_baseline.json").read_text(encoding="utf-8"))
+          required = {
+              "total_signals",
+              "resolved_trades",
+              "wins",
+              "losses",
+              "unresolved",
+              "win_rate",
+              "net_r",
+              "expectancy_r",
+              "profit_factor",
+              "max_drawdown_r",
+          }
+          missing = required.difference(data)
+          if missing:
+              raise SystemExit(f"Missing baseline metrics: {sorted(missing)}")
+          print("Baseline artifact verified")
+          print(json.dumps(data, indent=2, sort_keys=True))
+          PY
+
       - name: Upload Results Artifact
         if: success()
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
@@ -84,4 +118,6 @@ jobs:
           name: backtest-report-${{ github.sha }}
           if-no-files-found: error
           retention-days: 30
-          path: reports/backtest_results.csv
+          path: |
+            reports/backtest_results.csv
+            reports/backtest_baseline.json
