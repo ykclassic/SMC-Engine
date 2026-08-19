@@ -1,33 +1,28 @@
-name: AI - Model Retraining Pipeline
+name: AI - Research Retraining
 
+# AI training is explicitly a research workflow. It must never gate
+# deterministic production validation, deployment, or live execution.
 on:
+  workflow_dispatch:
+    inputs:
+      run_full_training:
+        description: "Run the full AI training experiment"
+        required: false
+        default: true
+        type: boolean
+      run_ablation:
+        description: "Run the controlled feature ablation experiment"
+        required: false
+        default: true
+        type: boolean
   schedule:
     - cron: "0 0 * * 6"
-  workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/ai_retrain.yml"
-      - "scripts/train_models.py"
-      - "scripts/train_models_calibrated.py"
-      - "scripts/train_models_calibration_diagnostic.py"
-      - "scripts/train_models_integrity.py"
-      - "scripts/train_models_integrity_unweighted.py"
-      - "scripts/train_models_ablation.py"
-      - "scripts/diagnose_candidate_label_integrity.py"
-      - "scripts/validate_model.py"
-      - "core/**"
-      - "models/**/*.py"
-      - "data/**"
-      - "utils/**"
-      - "config/settings.yaml"
-      - "config/constants.py"
-      - "requirements-train.txt"
-      - "tests/**"
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ai-retraining
+  group: ai-research-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -38,13 +33,9 @@ env:
   MKL_NUM_THREADS: "2"
   EXCHANGE: "bitget"
 
-defaults:
-  run:
-    shell: bash
-
 jobs:
-  retrain-model:
-    name: Train, Validate, and Package Model
+  research:
+    name: AI research experiments
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -63,336 +54,119 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-train.txt
 
-      - name: Install Training Dependencies
+      - name: Install Research Dependencies
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install --prefer-binary -r requirements-train.txt
 
-      - name: Verify Repository Integrity
-        run: |
-          set -euo pipefail
-          required_files=(
-            "core/__init__.py"
-            "models/__init__.py"
-            "utils/__init__.py"
-            "data/__init__.py"
-          )
-          for path in "${required_files[@]}"; do
-            if [[ ! -f "$path" ]]; then
-              echo "::error title=Repository integrity failure::$path is missing"
-              exit 1
-            fi
-          done
-
-      - name: Python Compile Check
-        run: |
-          set -euo pipefail
-          python -m compileall -q core scripts models data utils
-
-      - name: Full Test Suite
+      - name: Run Repository Tests
         run: |
           set -euo pipefail
           python -m pytest -q
 
-      - name: Runtime Diagnostics
-        run: |
-          set -euo pipefail
-          python --version
-          python -m pip --version
-          git rev-parse HEAD
-          git status --short
-
-      - name: Validate Bitget Credentials
+      - name: Run Candidate and Label Diagnostics
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
         run: |
           set -euo pipefail
-          missing=0
-          for name in EXCHANGE_API_KEY EXCHANGE_API_SECRET EXCHANGE_PASSPHRASE; do
-            if [[ -z "${!name:-}" ]]; then
-              echo "::error title=Missing Bitget secret::$name is not configured"
-              missing=1
-            else
-              echo "$name is configured."
-            fi
-          done
-          if [[ "$missing" -ne 0 ]]; then
-            exit 1
-          fi
-
-      - name: Candidate and Label Integrity Diagnostics
-        id: candidate_label_diagnostics
-        env:
-          EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
-          EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
-          EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
-        run: |
-          set -euo pipefail
+          mkdir -p artifacts/ai_research
           python scripts/diagnose_candidate_label_integrity.py
+          if [[ -f models/weights/candidate_label_integrity.json ]]; then
+            cp models/weights/candidate_label_integrity.json artifacts/ai_research/
+          fi
 
-      - name: Upload Candidate and Label Diagnostics
-        if: always()
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
-        with:
-          name: candidate-label-integrity-${{ github.sha }}
-          if-no-files-found: warn
-          retention-days: 30
-          path: models/weights/candidate_label_integrity.json
+      - name: Run Controlled Ablation
+        if: ${{ inputs.run_ablation != false }}
+        env:
+          ABLATION_EPOCHS: "20"
+          ABLATION_SEED: "42"
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/ai_research
+          python scripts/ablation_feature_groups.py \
+            --epochs "${ABLATION_EPOCHS}" \
+            --seed "${ABLATION_SEED}" \
+            --output artifacts/ai_research/ablation_results.json
 
-      - name: Label Integrity and Context Ablation Diagnostics
-        id: ablation
+      - name: Run Full AI Training Experiment
+        if: ${{ inputs.run_full_training != false }}
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
         run: |
           set -euo pipefail
-          python scripts/train_models_ablation.py
-
-      - name: Upload Label and Context Diagnostics
-        if: always()
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
-        with:
-          name: label-context-ablation-${{ github.sha }}
-          if-no-files-found: warn
-          retention-days: 30
-          path: models/weights/label_context_ablation.json
-
-      - name: Train on Real Bitget Market Data
-        id: training
-        if: success()
-        env:
-          EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
-          EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
-          EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
-        run: |
-          set -euo pipefail
-          python scripts/train_models_integrity_unweighted.py
-
-      - name: Verify Training Artifacts
-        if: success()
-        run: |
-          set -euo pipefail
-          required=(
-            "models/weights/latest_gru.pth"
-            "models/weights/feature_scaler.joblib"
-            "models/weights/model_metadata.json"
-          )
-          for path in "${required[@]}"; do
-            if [[ ! -s "$path" ]]; then
-              echo "::error title=Missing or empty training artifact::$path"
-              exit 1
-            fi
-            echo "Verified: $path"
-            ls -lh "$path"
-          done
-
-      - name: Inspect Training Metadata
-        if: success()
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          from models.candidate_context import CONTEXT_COLUMNS, CONTEXT_VERSION
-
-          path = Path("models/weights/model_metadata.json")
-          metadata = json.loads(path.read_text(encoding="utf-8"))
-          required = {
-              "model_version", "feature_version", "feature_columns",
-              "candidate_context_version", "candidate_context_columns",
-              "sequence_length", "decision_threshold", "validation", "test",
-              "trained_symbols", "total_labeled_candidates", "symbol_statistics",
-              "model_sha256", "scaler_sha256", "training_positive_weight",
-              "threshold_search", "training_loss",
-          }
-          missing = sorted(required.difference(metadata))
-          if missing:
-              raise SystemExit("Model metadata is missing: " + ", ".join(missing))
-          if metadata["candidate_context_version"] != CONTEXT_VERSION:
-              raise SystemExit("Candidate context version mismatch")
-          if metadata["candidate_context_columns"] != list(CONTEXT_COLUMNS):
-              raise SystemExit("Candidate context schema mismatch")
-          threshold = float(metadata["decision_threshold"])
-          if not 0.0 < threshold < 1.0:
-              raise SystemExit(f"Invalid decision threshold: {threshold}")
-          if int(metadata["total_labeled_candidates"]) <= 0:
-              raise SystemExit("No labeled candidates were recorded")
-          if float(metadata["training_positive_weight"]) != 1.0:
-              raise SystemExit("Production retraining must use neutral positive_class_weight=1.0")
-          if metadata["training_loss"] != "bce":
-              raise SystemExit("Production retraining must use unweighted BCE")
-          print(json.dumps(metadata, indent=2))
-          PY
-
-      - name: Validate Out-of-Sample Metrics
-        id: validation
-        if: success()
-        run: |
-          set -euo pipefail
-          python scripts/validate_model.py
-
-      - name: Verify Final Model Integrity
-        if: success()
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import hashlib
-          import json
-          from pathlib import Path
-
-          base = Path("models/weights")
-          metadata = json.loads((base / "model_metadata.json").read_text(encoding="utf-8"))
-
-          def sha256(path):
-              digest = hashlib.sha256()
-              with path.open("rb") as handle:
-                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                      digest.update(chunk)
-              return digest.hexdigest()
-
-          model_hash = sha256(base / "latest_gru.pth")
-          scaler_hash = sha256(base / "feature_scaler.joblib")
-          if model_hash != metadata["model_sha256"]:
-              raise SystemExit("Model SHA-256 does not match metadata")
-          if scaler_hash != metadata["scaler_sha256"]:
-              raise SystemExit("Scaler SHA-256 does not match metadata")
-          print(f"Model SHA-256 verified: {model_hash}")
-          print(f"Scaler SHA-256 verified: {scaler_hash}")
-          PY
-
-      - name: Upload Validated Model Package
-        if: success()
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
-        with:
-          name: validated-gru-${{ github.sha }}
-          if-no-files-found: error
-          retention-days: 30
-          path: |
-            models/weights/latest_gru.pth
-            models/weights/feature_scaler.joblib
-            models/weights/model_metadata.json
-
-      - name: Training Diagnostics
-        if: failure()
-        run: |
-          echo "Training pipeline failed."
-          git status --short
-          if [[ -d models/weights ]]; then
-            find models/weights -maxdepth 1 -type f -printf '%f %s bytes\n'
-          fi
-
-      - name: Job Summary
-        if: always()
-        run: |
-          {
-            echo "## AI Retraining Pipeline"
-            echo ""
-            echo "- Commit: \`${GITHUB_SHA}\`"
-            echo "- Workflow: \`${GITHUB_RUN_ID}\`"
-            echo "- Status: \`${{ job.status }}\`"
-            echo "- Primary exchange: Bitget"
-            echo "- Fallback exchange: disabled for current deployment phase"
-            echo "- Training: neutral/unweighted BCE by default"
-            echo "- Labels: keyed by (candidate_index, direction)"
-            echo "- Candidate context: direction + event type"
-            echo "- Candidate/label integrity: causal, collision, split-boundary, and separability diagnostics"
-            echo "- Ablation: blocking diagnostic; failure stops the pipeline"
-            echo "- Calibration: aggregate validation threshold + chronological diagnostics"
-            echo "- Test set: frozen and untouched during threshold selection"
-            echo "- Promotion: only after artifact, metric, and hash gates pass"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  promote-model:
-    name: Promote Immutable Model Release
-    needs: retrain-model
-    if: needs.retrain-model.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-      actions: read
-
-    steps:
-      - name: Download Validated Model Package
-        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e
-        with:
-          name: validated-gru-${{ github.sha }}
-          path: models/weights
-
-      - name: Validate Release Metadata and Hashes
-        id: metadata
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import hashlib
-          import json
-          from pathlib import Path
-
-          base = Path("models/weights")
-          metadata = json.loads((base / "model_metadata.json").read_text(encoding="utf-8"))
-          version = str(metadata.get("model_version", "")).strip()
-          if not version:
-              raise SystemExit("model_version is missing")
-          if any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for char in version):
-              raise SystemExit(f"Unsafe model_version: {version!r}")
-
-          def sha256(path):
-              digest = hashlib.sha256()
-              with path.open("rb") as handle:
-                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                      digest.update(chunk)
-              return digest.hexdigest()
-
-          model_hash = sha256(base / "latest_gru.pth")
-          scaler_hash = sha256(base / "feature_scaler.joblib")
-          if model_hash != str(metadata["model_sha256"]).lower():
-              raise SystemExit("Model hash changed after validation")
-          if scaler_hash != str(metadata["scaler_sha256"]).lower():
-              raise SystemExit("Scaler hash changed after validation")
-
-          with open("model_version.txt", "w", encoding="utf-8") as handle:
-              handle.write(version)
-          print(f"Validated model release version: {version}")
-          print(f"Model SHA-256: {model_hash}")
-          print(f"Scaler SHA-256: {scaler_hash}")
-          PY
-
-      - name: Create Immutable GitHub Model Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          MODEL_VERSION="$(cat model_version.txt)"
-          TAG="model-${MODEL_VERSION}"
-
-          if gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "::error title=Model release already exists::$TAG"
-            exit 1
-          fi
-
-          gh release create "$TAG" \
+          mkdir -p artifacts/ai_research/training
+          python scripts/train_models_integrity_unweighted.py --experiment-mode
+          for path in \
             models/weights/latest_gru.pth \
             models/weights/feature_scaler.joblib \
-            models/weights/model_metadata.json \
-            --repo "${GITHUB_REPOSITORY}" \
-            --target "${GITHUB_SHA}" \
-            --title "SMC Engine Model ${MODEL_VERSION}" \
-            --notes "Validated production model release. Commit: ${GITHUB_SHA}. Model version: ${MODEL_VERSION}. Primary market-data exchange: Bitget. XT.com fallback is intentionally disabled until the live system is validated. Artifacts were validated with SHA-256 before promotion."
+            models/weights/model_metadata.json; do
+            if [[ -s "$path" ]]; then
+              cp "$path" artifacts/ai_research/training/
+            fi
+          done
 
-      - name: Promotion Summary
+      - name: Verify Research Artifacts
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/ai_research
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("artifacts/ai_research")
+          manifest = {
+              "schema_version": "ai-research-v1",
+              "research_only": True,
+              "production_dependency": False,
+              "promotion_enabled": False,
+              "commit": os.environ["GITHUB_SHA"],
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "artifacts": {},
+          }
+
+          for path in sorted(root.rglob("*")):
+              if not path.is_file() or path.name == "research_manifest.json":
+                  continue
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              manifest["artifacts"][str(path.relative_to(root))] = {
+                  "sha256": digest,
+                  "bytes": path.stat().st_size,
+              }
+
+          (root / "research_manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(manifest, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload Research Artifacts
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: ai-research-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 30
+          path: artifacts/ai_research
+
+      - name: Research Summary
+        if: always()
         run: |
           {
-            echo "## Immutable Model Promotion"
+            echo "## AI Research Workflow"
             echo ""
-            echo "- Model version: \`$(cat model_version.txt)\`"
-            echo "- Release tag: \`model-$(cat model_version.txt)\`"
+            echo "- Research only: true"
+            echo "- Production dependency: false"
+            echo "- Model promotion: disabled"
+            echo "- Deterministic production baseline: untouched"
             echo "- Source commit: \`${GITHUB_SHA}\`"
-            echo "- Primary exchange: Bitget"
-            echo "- Fallback exchange: disabled for current deployment phase"
-            echo "- Model registry: GitHub Release assets"
-            echo "- Main branch model files were not mutated."
+            echo "- Workflow run: \`${GITHUB_RUN_ID}\`"
           } >> "$GITHUB_STEP_SUMMARY"
