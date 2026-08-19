@@ -37,12 +37,14 @@ jobs:
       - name: Verify Package Structures
         run: |
           set -euo pipefail
+
           required_files=(
             "core/__init__.py"
             "models/__init__.py"
             "utils/__init__.py"
             "data/__init__.py"
           )
+
           for path in "${required_files[@]}"; do
             if [[ ! -f "$path" ]]; then
               echo "::error title=Repository integrity failure::$path is missing"
@@ -56,10 +58,152 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Verify CI Checkout and Test Provenance
+        run: |
+          set -euo pipefail
+
+          echo "============================================================"
+          echo "CI PROVENANCE"
+          echo "============================================================"
+
+          echo "Repository: ${GITHUB_REPOSITORY}"
+          echo "Event:      ${GITHUB_EVENT_NAME}"
+          echo "Ref:        ${GITHUB_REF}"
+          echo "Ref name:   ${GITHUB_REF_NAME}"
+          echo "SHA:        ${GITHUB_SHA}"
+          echo "Actor:      ${GITHUB_ACTOR}"
+          echo "Workflow:   ${GITHUB_WORKFLOW}"
+          echo "Run ID:     ${GITHUB_RUN_ID}"
+          echo "Run number: ${GITHUB_RUN_NUMBER}"
+
+          echo
+          echo "============================================================"
+          echo "GIT CHECKOUT"
+          echo "============================================================"
+
+          echo "Repository root:"
+          git rev-parse --show-toplevel
+
+          echo
+          echo "HEAD:"
+          git rev-parse HEAD
+
+          echo
+          echo "HEAD short:"
+          git rev-parse --short HEAD
+
+          echo
+          echo "Current branch/ref:"
+          git branch --show-current || true
+
+          echo
+          echo "Git status:"
+          git status --short
+
+          echo
+          echo "Remote:"
+          git remote -v
+
+          echo
+          echo "HEAD commit:"
+          git log -1 --decorate --oneline --stat
+
+          EXPECTED_SHA="${GITHUB_SHA}"
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+
+          if [[ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]]; then
+            echo "::error title=CI checkout provenance mismatch::GITHUB_SHA=${EXPECTED_SHA} but checked-out HEAD=${ACTUAL_SHA}"
+            exit 1
+          fi
+
+          echo
+          echo "Checkout provenance verified:"
+          echo "${ACTUAL_SHA}"
+
+          echo
+          echo "============================================================"
+          echo "BACKTEST TEST FILE DISCOVERY"
+          echo "============================================================"
+
+          echo "Searching for test_backtest.py:"
+          find . -type f -name 'test_backtest.py' -print
+
+          echo
+          echo "Searching for backtest-related test files:"
+          find . -type f \
+            \( \
+              -name '*backtest*test*.py' \
+              -o -name 'test_*backtest*.py' \
+              -o -name '*test*backtest*.py' \
+            \) \
+            -print
+
+          echo
+          echo "============================================================"
+          echo "GIT-TRACKED BACKTEST TEST FILES"
+          echo "============================================================"
+
+          BACKTEST_TESTS="$(git ls-files | grep -E '(^|/)test_backtest\.py$|backtest.*test|test.*backtest' || true)"
+
+          if [[ -n "$BACKTEST_TESTS" ]]; then
+            printf '%s\n' "$BACKTEST_TESTS"
+          else
+            echo "No Git-tracked backtest test files found."
+          fi
+
+          echo
+          echo "============================================================"
+          echo "TEST DIRECTORY"
+          echo "============================================================"
+
+          if [[ -d tests ]]; then
+            find tests -maxdepth 3 -type f -print | sort
+          else
+            echo "::error title=Repository integrity failure::tests/ directory does not exist"
+            exit 1
+          fi
+
+          echo
+          echo "============================================================"
+          echo "PYTEST CONFIGURATION"
+          echo "============================================================"
+
+          if [[ -f pytest.ini ]]; then
+            echo "--- pytest.ini ---"
+            cat pytest.ini
+          else
+            echo "pytest.ini: not present"
+          fi
+
+          if [[ -f pyproject.toml ]]; then
+            echo "--- pyproject.toml pytest configuration ---"
+            grep -n -A40 -B5 '\[tool.pytest' pyproject.toml || true
+          else
+            echo "pyproject.toml: not present"
+          fi
+
+          if [[ -f setup.cfg ]]; then
+            echo "--- setup.cfg pytest configuration ---"
+            grep -n -A40 -B5 '\[tool:pytest\]' setup.cfg || true
+          else
+            echo "setup.cfg: not present"
+          fi
+
+          echo
+          echo "============================================================"
+          echo "PYTEST COLLECTION"
+          echo "============================================================"
+
+          pytest --collect-only -q
+
       - name: Syntax and Undefined-Name Checks
-        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        run: |
+          set -euo pipefail
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
 
       - name: Run Unit Tests
         env:
           PYTHONPATH: .
-        run: pytest tests/ -q
+        run: |
+          set -euo pipefail
+          pytest tests/ -q
