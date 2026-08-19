@@ -26,14 +26,17 @@ on:
       - "requirements-train.txt"
       - "tests/**"
 
-permissions:
-  contents: write
+concurrency:
+  group: ai-retraining
+  cancel-in-progress: false
 
 env:
+  PYTHON_VERSION: "3.11"
   PYTHONPATH: .
   PYTHONUNBUFFERED: "1"
   OMP_NUM_THREADS: "2"
   MKL_NUM_THREADS: "2"
+  EXCHANGE: "xt"
 
 defaults:
   run:
@@ -41,23 +44,22 @@ defaults:
 
 jobs:
   retrain-model:
-    name: Train, Validate, and Version Model
+    name: Train, Validate, and Package Model
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    concurrency:
-      group: ai-retraining
-      cancel-in-progress: false
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
-          python-version: "3.11"
+          python-version: "${{ env.PYTHON_VERSION }}"
           cache: pip
           cache-dependency-path: requirements-train.txt
 
@@ -66,6 +68,22 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install --prefer-binary -r requirements-train.txt
+
+      - name: Verify Repository Integrity
+        run: |
+          set -euo pipefail
+          required_files=(
+            "core/__init__.py"
+            "models/__init__.py"
+            "utils/__init__.py"
+            "data/__init__.py"
+          )
+          for path in "${required_files[@]}"; do
+            if [[ ! -f "$path" ]]; then
+              echo "::error title=Repository integrity failure::$path is missing"
+              exit 1
+            fi
+          done
 
       - name: Python Compile Check
         run: |
@@ -101,7 +119,9 @@ jobs:
               echo "$name is configured."
             fi
           done
-          if [[ "$missing" -ne 0 ]]; then exit 1; fi
+          if [[ "$missing" -ne 0 ]]; then
+            exit 1
+          fi
 
       - name: Candidate and Label Integrity Diagnostics
         id: candidate_label_diagnostics
@@ -115,7 +135,7 @@ jobs:
 
       - name: Upload Candidate and Label Diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
           name: candidate-label-integrity-${{ github.sha }}
           if-no-files-found: error
@@ -140,7 +160,7 @@ jobs:
 
       - name: Upload Label and Context Diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
           name: label-context-ablation-${{ github.sha }}
           if-no-files-found: warn
@@ -184,6 +204,7 @@ jobs:
           import json
           from pathlib import Path
           from models.candidate_context import CONTEXT_COLUMNS, CONTEXT_VERSION
+
           path = Path("models/weights/model_metadata.json")
           metadata = json.loads(path.read_text(encoding="utf-8"))
           required = {
@@ -228,14 +249,17 @@ jobs:
           import hashlib
           import json
           from pathlib import Path
+
           base = Path("models/weights")
           metadata = json.loads((base / "model_metadata.json").read_text(encoding="utf-8"))
+
           def sha256(path):
               digest = hashlib.sha256()
               with path.open("rb") as handle:
                   for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                       digest.update(chunk)
               return digest.hexdigest()
+
           model_hash = sha256(base / "latest_gru.pth")
           scaler_hash = sha256(base / "feature_scaler.joblib")
           if model_hash != metadata["model_sha256"]:
@@ -246,9 +270,9 @@ jobs:
           print(f"Scaler SHA-256 verified: {scaler_hash}")
           PY
 
-      - name: Upload Validated Artifacts
+      - name: Upload Validated Model Package
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
           name: validated-gru-${{ github.sha }}
           if-no-files-found: error
@@ -257,26 +281,6 @@ jobs:
             models/weights/latest_gru.pth
             models/weights/feature_scaler.joblib
             models/weights/model_metadata.json
-
-      - name: Commit Validated Model
-        if: success()
-        run: |
-          set -euo pipefail
-          git config user.email "action@github.com"
-          git config user.name "GitHub Action"
-          git add models/weights/latest_gru.pth models/weights/feature_scaler.joblib models/weights/model_metadata.json
-          if git diff --cached --quiet; then
-            echo "No model changes."
-            exit 0
-          fi
-          MODEL_VERSION="$(python - <<'PY'
-          import json
-          with open("models/weights/model_metadata.json", encoding="utf-8") as handle:
-              print(json.load(handle)["model_version"])
-          PY
-          )"
-          git commit -m "ci: promote validated SMC model ${MODEL_VERSION}"
-          git push origin HEAD:main
 
       - name: Training Diagnostics
         if: failure()
@@ -304,4 +308,93 @@ jobs:
             echo "- Calibration: aggregate validation threshold + chronological diagnostics"
             echo "- Test set: frozen and untouched during threshold selection"
             echo "- Promotion: only after artifact, metric, and hash gates pass"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  promote-model:
+    name: Promote Immutable Model Release
+    needs: retrain-model
+    if: needs.retrain-model.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - name: Download Validated Model Package
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e
+        with:
+          name: validated-gru-${{ github.sha }}
+          path: models/weights
+
+      - name: Validate Release Metadata and Hashes
+        id: metadata
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          base = Path("models/weights")
+          metadata = json.loads((base / "model_metadata.json").read_text(encoding="utf-8"))
+          version = str(metadata.get("model_version", "")).strip()
+          if not version:
+              raise SystemExit("model_version is missing")
+          if any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for char in version):
+              raise SystemExit(f"Unsafe model_version: {version!r}")
+
+          def sha256(path):
+              digest = hashlib.sha256()
+              with path.open("rb") as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          model_hash = sha256(base / "latest_gru.pth")
+          scaler_hash = sha256(base / "feature_scaler.joblib")
+          if model_hash != str(metadata["model_sha256"]).lower():
+              raise SystemExit("Model hash changed after validation")
+          if scaler_hash != str(metadata["scaler_sha256"]).lower():
+              raise SystemExit("Scaler hash changed after validation")
+
+          with open("model_version.txt", "w", encoding="utf-8") as handle:
+              handle.write(version)
+          print(f"Validated model release version: {version}")
+          print(f"Model SHA-256: {model_hash}")
+          print(f"Scaler SHA-256: {scaler_hash}")
+          PY
+
+      - name: Create Immutable GitHub Model Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          MODEL_VERSION="$(cat model_version.txt)"
+          TAG="model-${MODEL_VERSION}"
+
+          if gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "::error title=Model release already exists::$TAG"
+            exit 1
+          fi
+
+          gh release create "$TAG" \
+            models/weights/latest_gru.pth \
+            models/weights/feature_scaler.joblib \
+            models/weights/model_metadata.json \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "SMC Engine Model ${MODEL_VERSION}" \
+            --notes "Validated production model release. Commit: ${GITHUB_SHA}. Model version: ${MODEL_VERSION}. Artifacts were validated with SHA-256 before promotion."
+
+      - name: Promotion Summary
+        run: |
+          {
+            echo "## Immutable Model Promotion"
+            echo ""
+            echo "- Model version: \`$(cat model_version.txt)\`"
+            echo "- Release tag: \`model-$(cat model_version.txt)\`"
+            echo "- Source commit: \`${GITHUB_SHA}\`"
+            echo "- Model registry: GitHub Release assets"
+            echo "- Main branch model files were not mutated."
           } >> "$GITHUB_STEP_SUMMARY"
