@@ -1,5 +1,5 @@
 trading:
-  exchange: bitget
+  exchange: xt
   market_type: swap
   symbols:
     - BTC/USDT:USDT
