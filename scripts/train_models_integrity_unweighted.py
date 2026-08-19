@@ -46,11 +46,6 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Alias for --experiment-mode.",
-    )
-    parser.add_argument(
         "--output",
         type=Path,
         default=Path("artifacts/ablation_results.json"),
@@ -385,6 +380,6 @@ if __name__ == "__main__":
     args = _parse_args()
     train(
         load_all_configs(require_notifications=False),
-        experiment_mode=args.experiment_mode or args.dry_run,
+        experiment_mode=args.experiment_mode,
         output_path=args.output,
     )
