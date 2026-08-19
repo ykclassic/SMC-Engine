@@ -30,6 +30,7 @@ MODEL_ARTIFACTS = (
 )
 LIVE_WORKFLOW = Path(".github/workflows/live_signal_monitor.yml")
 RESEARCH_WORKFLOW = Path(".github/workflows/smc_feature_ablation.yml")
+SETTINGS = Path("config/settings.yaml")
 
 
 def _imports(path: Path) -> set[str]:
@@ -43,23 +44,23 @@ def _imports(path: Path) -> set[str]:
     return modules
 
 
-def _load_settings() -> dict:
-    text = Path("config/settings.yaml").read_text(encoding="utf-8")
-    # The repository's settings file is JSON-compatible YAML. Keeping this
-    # parser dependency-free makes the verification usable in live CI.
-    return json.loads(text)
+def _setting_is_false(text: str, key: str) -> bool:
+    return any(
+        line.strip() == f"{key}: false"
+        for line in text.splitlines()
+    )
 
 
 def verify() -> dict:
-    missing = [str(path) for path in PRODUCTION_FILES if not path.is_file()]
+    required = [*PRODUCTION_FILES, LIVE_WORKFLOW, RESEARCH_WORKFLOW, SETTINGS]
+    missing = [str(path) for path in required if not path.is_file()]
     if missing:
-        raise SystemExit(f"Missing production files: {missing}")
+        raise SystemExit(f"Missing isolation files: {missing}")
 
-    settings = _load_settings()
-    model = settings.get("model", {})
-    if model.get("enabled") is not False:
+    settings_text = SETTINGS.read_text(encoding="utf-8")
+    if not _setting_is_false(settings_text, "enabled"):
         raise SystemExit("Phase 5 isolation failure: production AI must be disabled")
-    if model.get("required") is not False:
+    if not _setting_is_false(settings_text, "required"):
         raise SystemExit("Phase 5 isolation failure: production model must not be required")
 
     violations = []
@@ -83,7 +84,7 @@ def verify() -> dict:
         raise SystemExit("Live workflow references the AI research workflow")
     if "models/weights/latest_gru.pth" in live_text:
         raise SystemExit("Live workflow references a model artifact")
-    if "SMC_AI_ENABLED: \"false\"" not in live_text:
+    if 'SMC_AI_ENABLED: "false"' not in live_text:
         raise SystemExit("Live workflow does not explicitly disable AI")
     if "scripts.ablation_feature_groups" not in research_text:
         raise SystemExit("Research workflow does not invoke the isolated ablation harness")
