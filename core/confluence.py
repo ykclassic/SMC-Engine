@@ -6,17 +6,37 @@ import uuid
 import pandas as pd
 
 from core.risk import RiskEngine
-from models.inference import ModelInference
 from models.signal import TradingSignal
 
 
 class ConfluenceEngine:
+    """Validate deterministic SMC confluence with optional AI enhancement.
+
+    The trading decision is intentionally independent of the AI subsystem.
+    AI is an optional enhancement and is never required for deterministic
+    signal generation when disabled in configuration.
+    """
+
     def __init__(self, config: dict) -> None:
         self.minimum_score = float(config["confluence"]["minimum_score"])
         self.weights = config["confluence"]["weights"]
-        self.ai_engine = ModelInference(config)
         self.risk = RiskEngine(config)
         self.logger = logging.getLogger("SMC-Confluence")
+        self.ai_engine = None
+
+        model_config = config.get("model", {})
+        self.ai_enabled = bool(model_config.get("enabled", False))
+        if self.ai_enabled:
+            # Keep the live deterministic engine independent of the AI runtime.
+            from models.inference import ModelInference
+
+            self.ai_engine = ModelInference(config)
+            self.logger.info(
+                "AI enhancement enabled; available=%s",
+                self.ai_engine.available,
+            )
+        else:
+            self.logger.info("AI enhancement disabled; using deterministic SMC engine")
 
     @staticmethod
     def _bias(df: pd.DataFrame) -> str:
@@ -50,13 +70,26 @@ class ConfluenceEngine:
             top, bottom = zone["fvg_top"], zone["fvg_bottom"]
         return {"top": float(top), "bottom": float(bottom)} if pd.notna(top) and pd.notna(bottom) else None
 
-    def validate_signal(self, daily_df: pd.DataFrame, h4_df: pd.DataFrame, h1_df: pd.DataFrame, m15_df: pd.DataFrame):
+    def validate_signal(
+        self,
+        daily_df: pd.DataFrame,
+        h4_df: pd.DataFrame,
+        h1_df: pd.DataFrame,
+        m15_df: pd.DataFrame,
+    ):
         diagnostic = {"decision": "REJECTED", "reason": "NO_SETUP"}
         daily_bias = self._bias(daily_df)
         h4_bias = self._bias(h4_df)
-        sweep_rows = m15_df.tail(3)[m15_df.tail(3)["liquidity_sweep"].notna()]
+        sweep_tail = m15_df.tail(3)
+        sweep_rows = sweep_tail[sweep_tail["liquidity_sweep"].notna()]
         if sweep_rows.empty:
-            diagnostic.update({"daily_bias": daily_bias, "h4_bias": h4_bias, "reason": "NO_M15_SWEEP"})
+            diagnostic.update(
+                {
+                    "daily_bias": daily_bias,
+                    "h4_bias": h4_bias,
+                    "reason": "NO_M15_SWEEP",
+                }
+            )
             return None, diagnostic
 
         sweep = sweep_rows.iloc[-1]["liquidity_sweep"]
@@ -72,29 +105,68 @@ class ConfluenceEngine:
         checks = {
             "daily_bias": daily_bias == required_bias,
             "h4_bias": h4_bias == required_bias,
-            "h1_setup": h1_zone is not None or h1_choch == ("BULLISH_CHOCH" if side == "LONG" else "BEARISH_CHOCH"),
+            "h1_setup": h1_zone is not None
+            or h1_choch == ("BULLISH_CHOCH" if side == "LONG" else "BEARISH_CHOCH"),
             "m15_sweep": True,
-            "m15_confirmation": m15_bos == ("BULLISH_BOS" if side == "LONG" else "BEARISH_BOS") or m15_choch == ("BULLISH_CHOCH" if side == "LONG" else "BEARISH_CHOCH"),
+            "m15_confirmation": m15_bos == ("BULLISH_BOS" if side == "LONG" else "BEARISH_BOS")
+            or m15_choch == ("BULLISH_CHOCH" if side == "LONG" else "BEARISH_CHOCH"),
         }
         score = sum(float(self.weights[key]) for key, passed in checks.items() if passed)
-        diagnostic.update({"daily_bias": daily_bias, "h4_bias": h4_bias, "side": side, "checks": checks, "confluence_score": score})
+        diagnostic.update(
+            {
+                "daily_bias": daily_bias,
+                "h4_bias": h4_bias,
+                "side": side,
+                "checks": checks,
+                "confluence_score": score,
+                "ai_enabled": self.ai_enabled,
+            }
+        )
         if score < self.minimum_score:
             diagnostic["reason"] = "CONFLUENCE_BELOW_THRESHOLD"
             return None, diagnostic
 
-        confidence = self.ai_engine.predict_confidence(m15_df)
-        diagnostic["ai_confidence"] = confidence
-        threshold = self.ai_engine.decision_threshold
-        if confidence < threshold:
-            diagnostic["reason"] = "AI_CONFIDENCE_BELOW_THRESHOLD"
-            return None, diagnostic
+        ai_confidence = None
+        if self.ai_enabled and self.ai_engine is not None and self.ai_engine.available:
+            ai_confidence = self.ai_engine.predict_confidence(m15_df)
+            diagnostic["ai_confidence"] = ai_confidence
+            threshold = self.ai_engine.decision_threshold
+            if ai_confidence < threshold:
+                diagnostic["reason"] = "AI_CONFIDENCE_BELOW_THRESHOLD"
+                return None, diagnostic
+        else:
+            diagnostic["ai_status"] = "DISABLED" if not self.ai_enabled else "UNAVAILABLE_OPTIONAL"
 
         entry = float(sweep_rows.iloc[-1]["close"])
-        atr = float(self.ai_engine.features._atr(m15_df).iloc[-1])
+        if self.ai_engine is not None:
+            atr_series = self.ai_engine.features._atr(m15_df)
+        else:
+            high = pd.to_numeric(m15_df["high"], errors="coerce")
+            low = pd.to_numeric(m15_df["low"], errors="coerce")
+            close = pd.to_numeric(m15_df["close"], errors="coerce")
+            previous_close = close.shift(1)
+            true_range = pd.concat(
+                [
+                    high - low,
+                    (high - previous_close).abs(),
+                    (low - previous_close).abs(),
+                ],
+                axis=1,
+            ).max(axis=1)
+            atr_series = true_range.rolling(14, min_periods=14).mean()
+
+        atr = float(atr_series.iloc[-1])
         if not pd.notna(atr) or atr <= 0:
             diagnostic["reason"] = "INVALID_ATR"
             return None, diagnostic
-        zone_limit = h1_zone["bottom"] if side == "LONG" and h1_zone else h1_zone["top"] if h1_zone else None
+
+        zone_limit = (
+            h1_zone["bottom"]
+            if side == "LONG" and h1_zone
+            else h1_zone["top"]
+            if h1_zone
+            else None
+        )
         stop_loss, take_profit = self.risk.levels(side, entry, atr, zone_limit)
         signal = TradingSignal(
             signal_id=str(uuid.uuid4()),
@@ -111,7 +183,7 @@ class ConfluenceEngine:
             h1_setup="POI/CHOCH",
             m15_trigger=sweep,
             confluence_score=score,
-            ai_confidence=confidence,
+            ai_confidence=ai_confidence,
             reason=f"{side} liquidity sweep with top-down MTF confluence",
         )
         diagnostic.update({"decision": "SIGNAL", "reason": "VALIDATED"})
