@@ -39,6 +39,7 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
+      actions: write
 
     steps:
       - name: Checkout repository
@@ -113,3 +114,12 @@ jobs:
               )
           print(json.dumps(payload, indent=2, sort_keys=True))
           PY
+
+      - name: Upload ablation report
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: smc-feature-ablation-report
+          path: artifacts/feature_ablation/ablation_results.json
+          if-no-files-found: error
+          retention-days: 14
