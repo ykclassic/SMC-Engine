@@ -36,7 +36,7 @@ env:
   PYTHONUNBUFFERED: "1"
   OMP_NUM_THREADS: "2"
   MKL_NUM_THREADS: "2"
-  EXCHANGE: "xt"
+  EXCHANGE: "bitget"
 
 defaults:
   run:
@@ -103,7 +103,7 @@ jobs:
           git rev-parse HEAD
           git status --short
 
-      - name: Validate Exchange Secrets
+      - name: Validate Bitget Credentials
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
@@ -113,7 +113,7 @@ jobs:
           missing=0
           for name in EXCHANGE_API_KEY EXCHANGE_API_SECRET EXCHANGE_PASSPHRASE; do
             if [[ -z "${!name:-}" ]]; then
-              echo "::error title=Missing secret::$name is not configured"
+              echo "::error title=Missing Bitget secret::$name is not configured"
               missing=1
             else
               echo "$name is configured."
@@ -167,7 +167,7 @@ jobs:
           retention-days: 30
           path: models/weights/label_context_ablation.json
 
-      - name: Train on Real Market Data
+      - name: Train on Real Bitget Market Data
         id: training
         if: success()
         env:
@@ -300,6 +300,8 @@ jobs:
             echo "- Commit: \`${GITHUB_SHA}\`"
             echo "- Workflow: \`${GITHUB_RUN_ID}\`"
             echo "- Status: \`${{ job.status }}\`"
+            echo "- Primary exchange: Bitget"
+            echo "- Fallback exchange: disabled for current deployment phase"
             echo "- Training: neutral/unweighted BCE by default"
             echo "- Labels: keyed by (candidate_index, direction)"
             echo "- Candidate context: direction + event type"
@@ -385,7 +387,7 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --target "${GITHUB_SHA}" \
             --title "SMC Engine Model ${MODEL_VERSION}" \
-            --notes "Validated production model release. Commit: ${GITHUB_SHA}. Model version: ${MODEL_VERSION}. Artifacts were validated with SHA-256 before promotion."
+            --notes "Validated production model release. Commit: ${GITHUB_SHA}. Model version: ${MODEL_VERSION}. Primary market-data exchange: Bitget. XT.com fallback is intentionally disabled until the live system is validated. Artifacts were validated with SHA-256 before promotion."
 
       - name: Promotion Summary
         run: |
@@ -395,6 +397,8 @@ jobs:
             echo "- Model version: \`$(cat model_version.txt)\`"
             echo "- Release tag: \`model-$(cat model_version.txt)\`"
             echo "- Source commit: \`${GITHUB_SHA}\`"
+            echo "- Primary exchange: Bitget"
+            echo "- Fallback exchange: disabled for current deployment phase"
             echo "- Model registry: GitHub Release assets"
             echo "- Main branch model files were not mutated."
           } >> "$GITHUB_STEP_SUMMARY"
