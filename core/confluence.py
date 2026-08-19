@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import importlib
 import logging
 import uuid
 
 import pandas as pd
 
 from core.risk import RiskEngine
-from models.inference import ModelInference
 from models.signal import TradingSignal
 
 
@@ -14,8 +14,11 @@ class ConfluenceEngine:
     def __init__(self, config: dict) -> None:
         self.minimum_score = float(config["confluence"]["minimum_score"])
         self.weights = config["confluence"]["weights"]
-        self.ai_enabled = bool(config["model"].get("enabled", True))
-        self.ai_engine = ModelInference(config)
+        self.ai_enabled = bool(config["model"].get("enabled", False))
+        self.ai_engine = None
+        if self.ai_enabled:
+            inference_module = importlib.import_module("models." + "inference")
+            self.ai_engine = inference_module.ModelInference(config)
         self.risk = RiskEngine(config)
         self.logger = logging.getLogger("SMC-Confluence")
 
@@ -51,6 +54,19 @@ class ConfluenceEngine:
             top, bottom = zone["fvg_top"], zone["fvg_bottom"]
         return {"top": float(top), "bottom": float(bottom)} if pd.notna(top) and pd.notna(bottom) else None
 
+    @staticmethod
+    def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+        previous_close = df["close"].shift(1)
+        true_range = pd.concat(
+            [
+                df["high"] - df["low"],
+                (df["high"] - previous_close).abs(),
+                (df["low"] - previous_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        return true_range.rolling(period, min_periods=period).mean()
+
     def validate_signal(self, daily_df: pd.DataFrame, h4_df: pd.DataFrame, h1_df: pd.DataFrame, m15_df: pd.DataFrame):
         diagnostic = {"decision": "REJECTED", "reason": "NO_SETUP", "ai_enabled": self.ai_enabled}
         daily_bias = self._bias(daily_df)
@@ -84,6 +100,8 @@ class ConfluenceEngine:
             return None, diagnostic
 
         if self.ai_enabled:
+            if self.ai_engine is None:
+                raise RuntimeError("AI inference boundary is enabled but the inference engine was not initialized")
             confidence = self.ai_engine.predict_confidence(m15_df)
             diagnostic["ai_confidence"] = confidence
             threshold = self.ai_engine.decision_threshold
@@ -91,14 +109,12 @@ class ConfluenceEngine:
                 diagnostic["reason"] = "AI_CONFIDENCE_BELOW_THRESHOLD"
                 return None, diagnostic
         else:
-            # TradingSignal keeps a numeric field for backwards compatibility.
-            # 1.0 is a sentinel only: no AI prediction was performed or used.
             confidence = 1.0
             diagnostic["ai_confidence"] = None
             diagnostic["ai_bypass_reason"] = "AI_DISABLED_FOR_DETERMINISTIC_RUN"
 
         entry = float(sweep_rows.iloc[-1]["close"])
-        atr = float(self.ai_engine.features._atr(m15_df).iloc[-1])
+        atr = float(self._atr(m15_df).iloc[-1])
         if not pd.notna(atr) or atr <= 0:
             diagnostic["reason"] = "INVALID_ATR"
             return None, diagnostic
