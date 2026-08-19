@@ -1,5 +1,6 @@
 trading:
-  exchange: xt
+  exchange: bitget
+  fallback_exchange: xt
   market_type: swap
   symbols:
     - BTC/USDT:USDT
