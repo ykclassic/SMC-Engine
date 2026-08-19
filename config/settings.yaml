@@ -1,6 +1,7 @@
 trading:
   exchange: bitget
   fallback_exchange: xt
+  fallback_exchange_enabled: false
   market_type: swap
   symbols:
     - BTC/USDT:USDT
