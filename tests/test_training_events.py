@@ -52,8 +52,7 @@ def test_structure_does_not_mark_bos_before_swing_confirmation():
         }
     }
     detector = MarketStructureDetector(config)
-    frame = make_frame()
-    analyzed = detector.analyze(frame)
+    analyzed = detector.analyze(make_frame())
 
     assert "high_confirmed" in analyzed.columns
     assert "low_confirmed" in analyzed.columns
@@ -65,8 +64,7 @@ def test_training_builder_emits_canonical_candidate_schema():
     frame.loc[5, "bos"] = "BULLISH_BOS"
     frame.loc[12, "liquidity_sweep"] = "BEARISH_SWEEP"
 
-    builder = SMCTrainingEventBuilder(builder_config())
-    candidates = builder.build(frame)
+    candidates = SMCTrainingEventBuilder(builder_config()).build(frame)
 
     assert not candidates.empty
     assert list(candidates.columns) == [
@@ -78,9 +76,7 @@ def test_training_builder_emits_canonical_candidate_schema():
     assert candidates["candidate_index"].notna().all()
     assert candidates["candidate_index"].dtype.kind in "iu"
     assert set(candidates["direction"]) <= {"LONG", "SHORT"}
-    assert candidates[
-        ["candidate_index", "direction"]
-    ].duplicated().sum() == 0
+    assert candidates[["candidate_index", "direction"]].duplicated().sum() == 0
     assert candidates["distance_from_event"].min() >= 0
     assert candidates["distance_from_event"].max() <= 8
 
@@ -110,7 +106,7 @@ def test_builder_processes_all_event_types_on_same_candle():
     assert candidates.iloc[0]["event_type"] == "BULLISH_BOS"
 
 
-def test_training_builder_expands_candidates_from_multiple_event_origins():
+def test_training_builder_emits_candidates_from_multiple_event_origins():
     frame = add_event_columns(make_frame(30))
     frame.loc[5, "bos"] = "BULLISH_BOS"
     frame.loc[7, "fvg"] = "BULLISH_FVG"
@@ -130,7 +126,7 @@ def test_training_builder_expands_candidates_from_multiple_event_origins():
     assert len(candidates) >= 4
 
 
-def test_training_builder_opt_in_recovery_expands_sparse_dataset():
+def test_recovery_is_not_triggered_until_label_floor_is_unmet():
     frame = add_event_columns(make_frame(40))
     frame.loc[5, "bos"] = "BULLISH_BOS"
 
@@ -148,10 +144,15 @@ def test_training_builder_opt_in_recovery_expands_sparse_dataset():
     candidates = builder.build(frame)
 
     assert builder.last_build_stats["recovery_enabled"] is True
+    assert builder.last_build_stats["recovery_mode"] is False
+    assert builder.recovery_needed(len(candidates)) is True
+
+    builder.expand_capacity(frame_length=len(frame))
+    recovered = builder.build(frame)
+
     assert builder.last_build_stats["recovery_mode"] is True
-    assert builder.last_build_stats["recovery_window"] > 0
     assert builder.last_build_stats["recovery_spacing"] == 1
-    assert len(candidates) >= 10
+    assert len(recovered) >= 10
 
 
 def test_exact_298_label_shortfall_triggers_recovery_before_300_gate():
@@ -171,9 +172,6 @@ def test_exact_298_label_shortfall_triggers_recovery_before_300_gate():
     assert builder.recovery_needed(300) is False
     assert builder.recovery_iterations == 0
 
-    # The 298-label state must cause recovery rather than changing the hard
-    # minimum. Once the downstream label-aware controller reaches 300 usable
-    # labels, recovery is no longer required.
     builder.expand_capacity(frame_length=1024)
 
     assert builder.recovery_mode is True
@@ -196,8 +194,6 @@ def test_recovery_target_excludes_sequence_length_from_raw_candidate_target():
         }
     )
 
-    # 300 required labels + 20 forward-label horizon + 64 safety buffer.
-    # Sequence length must not inflate the raw candidate target.
     assert builder._recovery_target_candidates() == 384
 
 
@@ -209,11 +205,6 @@ def test_recovery_expands_beyond_previous_2048_window_ceiling():
     builder = SMCTrainingEventBuilder(
         {
             "training_events": {
-                # 766 + 20 + 64 = 850 candidate target. Recovery starts
-                # with a 64-candidate-per-event cap and doubles both the
-                # candidate capacity and causal window. The target is not
-                # reachable until the 4096 window, exercising expansion past
-                # the previous 2048 ceiling.
                 "minimum_labeled_candidates_per_symbol": 766,
                 "recovery_continuation_window": 512,
                 "recovery_growth_factor": 2,
@@ -229,8 +220,23 @@ def test_recovery_expands_beyond_previous_2048_window_ceiling():
         }
     )
 
-    candidates = builder.build(frame)
+    builder.build(frame)
+    while len(builder.build(frame)) < builder._recovery_target_candidates():
+        before = (
+            builder.current_window,
+            builder.current_max_candidates_per_event,
+            builder.recovery_iterations,
+        )
+        builder.expand_capacity(frame_length=len(frame))
+        after = (
+            builder.current_window,
+            builder.current_max_candidates_per_event,
+            builder.recovery_iterations,
+        )
+        if after == before:
+            break
 
+    candidates = builder.build(frame)
     assert builder.last_build_stats["recovery_mode"] is True
     assert builder.last_build_stats["recovery_iterations"] >= 4
     assert builder.last_build_stats["recovery_window"] >= 4096
@@ -282,6 +288,12 @@ def test_adaptive_recovery_growth_is_bounded_by_frame():
     candidates = builder.build(frame)
 
     assert not candidates.empty
+    assert builder.last_build_stats["recovery_mode"] is False
+    assert builder.last_build_stats["recovery_window"] <= len(frame) - 1
+
+    builder.expand_capacity(frame_length=len(frame))
+    candidates = builder.build(frame)
+
     assert builder.last_build_stats["recovery_window"] <= len(frame) - 1
     assert builder.last_build_stats["recovery_iterations"] >= 1
     assert builder.last_build_stats["recovery_capacity_limited"] is True
@@ -300,8 +312,8 @@ def test_training_builder_labels_use_canonical_direction_values():
         )
     )
     candidates = builder.build(frame)
-
     atr = pd.Series(1.0, index=frame.index)
+
     labels = builder.label_candidates(
         frame,
         candidates,
@@ -316,6 +328,7 @@ def test_training_builder_labels_use_canonical_direction_values():
     assert labels["candidate_index"].dtype.kind in "iu"
     assert set(labels["label"].unique()) <= {0.0, 1.0}
     assert labels.iloc[0]["label"] == 1.0
+    assert builder.last_label_stats["labeled_rows"] == len(labels)
 
 
 def test_unresolved_candidate_is_retained_as_negative_label():
