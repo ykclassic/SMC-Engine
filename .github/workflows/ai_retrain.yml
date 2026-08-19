@@ -144,7 +144,6 @@ jobs:
 
       - name: Label Integrity and Context Ablation Diagnostics
         id: ablation
-        continue-on-error: true
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
@@ -153,17 +152,12 @@ jobs:
           set -euo pipefail
           python scripts/train_models_ablation.py
 
-      - name: Report Ablation Failure
-        if: steps.ablation.outcome == 'failure'
-        run: |
-          echo "::warning title=Ablation diagnostic failed::The diagnostic report was preserved as an artifact. Production training will continue because the ablation is diagnostic-only; the authoritative training integrity and OOS gates remain blocking."
-
       - name: Upload Label and Context Diagnostics
         if: always()
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
           name: label-context-ablation-${{ github.sha }}
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
           path: models/weights/label_context_ablation.json
 
@@ -306,7 +300,7 @@ jobs:
             echo "- Labels: keyed by (candidate_index, direction)"
             echo "- Candidate context: direction + event type"
             echo "- Candidate/label integrity: causal, collision, split-boundary, and separability diagnostics"
-            echo "- Ablation: diagnostic-only; report preserved on failure"
+            echo "- Ablation: blocking diagnostic; failure stops the pipeline"
             echo "- Calibration: aggregate validation threshold + chronological diagnostics"
             echo "- Test set: frozen and untouched during threshold selection"
             echo "- Promotion: only after artifact, metric, and hash gates pass"
