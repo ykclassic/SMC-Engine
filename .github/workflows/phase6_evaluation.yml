@@ -1,0 +1,182 @@
+name: Phase 6 - Frozen Baseline vs AI OOS Evaluation
+
+# Phase 6 is a research/evaluation workflow. It never changes production code,
+# never promotes a model, and never recomputes the Phase 4 control.
+on:
+  workflow_dispatch:
+    inputs:
+      phase4_run_id:
+        description: "Completed Phase 4 workflow run ID whose artifact is the frozen control"
+        required: true
+        type: string
+      phase4_artifact_name:
+        description: "Phase 4 artifact name, e.g. phase4-baseline-<commit-sha>"
+        required: true
+        type: string
+      ai_run_id:
+        description: "Completed AI research workflow run ID containing a Phase 6 AI evaluation artifact"
+        required: true
+        type: string
+      ai_artifact_name:
+        description: "AI artifact containing phase6_ai_evaluation.json"
+        required: true
+        type: string
+      oos_start:
+        description: "Untouched OOS start timestamp (UTC, ISO-8601)"
+        required: true
+        type: string
+      oos_end:
+        description: "Untouched OOS end timestamp (UTC, ISO-8601)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: phase6-evaluation-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+  PYTHONPATH: .
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  evaluate:
+    name: Frozen SMC control vs AI on untouched OOS
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "${{ env.PYTHON_VERSION }}"
+
+      - name: Install Runtime Dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run Phase 5 Isolation Verification
+        run: |
+          set -euo pipefail
+          python -m pytest tests/test_ai_isolation.py tests/test_ai_boundary.py -q
+
+      - name: Download Frozen Phase 4 Control
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PHASE4_RUN_ID: ${{ inputs.phase4_run_id }}
+          PHASE4_ARTIFACT_NAME: ${{ inputs.phase4_artifact_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/phase4_control
+          gh run download "$PHASE4_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$PHASE4_ARTIFACT_NAME" \
+            --dir artifacts/phase4_control
+          test -s artifacts/phase4_control/reports/phase4_baseline_validation.json
+          test -s artifacts/phase4_control/reports/phase4_baseline_validation.csv
+
+      - name: Verify Frozen Phase 4 Control
+        env:
+          PHASE4_RUN_ID: ${{ inputs.phase4_run_id }}
+          PHASE4_ARTIFACT_NAME: ${{ inputs.phase4_artifact_name }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("artifacts/phase4_control/reports")
+          report = json.loads((root / "phase4_baseline_validation.json").read_text(encoding="utf-8"))
+          provenance = report["provenance"]
+
+          if report["schema_version"] != "phase4-baseline-v1":
+              raise SystemExit("Unexpected Phase 4 baseline schema")
+          if provenance["strategy"] != "deterministic_smc":
+              raise SystemExit("Frozen control is not deterministic_smc")
+          if provenance["ai_enabled"] is not False or provenance["ai_dependency"] is not False:
+              raise SystemExit("Frozen control is not AI-independent")
+          if provenance["model_artifacts_required"] is not False:
+              raise SystemExit("Frozen control requires model artifacts")
+
+          hashes = {}
+          for path in sorted(root.iterdir()):
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              hashes[path.name] = digest
+
+          print("PHASE6_FROZEN_CONTROL")
+          print(f"phase4_run_id={os.environ['PHASE4_RUN_ID']}")
+          print(f"phase4_artifact={os.environ['PHASE4_ARTIFACT_NAME']}")
+          print(json.dumps(hashes, indent=2, sort_keys=True))
+          PY
+
+      - name: Download AI Evaluation Artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AI_RUN_ID: ${{ inputs.ai_run_id }}
+          AI_ARTIFACT_NAME: ${{ inputs.ai_artifact_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/ai_evaluation
+          gh run download "$AI_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$AI_ARTIFACT_NAME" \
+            --dir artifacts/ai_evaluation
+          test -s artifacts/ai_evaluation/phase6_ai_evaluation.json
+
+      - name: Run Phase 6 Frozen-Control Harness
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/phase6
+          python scripts/run_phase6_evaluation.py \
+            --baseline-json artifacts/phase4_control/reports/phase4_baseline_validation.json \
+            --baseline-trades artifacts/phase4_control/reports/phase4_baseline_validation.csv \
+            --ai-evaluation artifacts/ai_evaluation/phase6_ai_evaluation.json \
+            --oos-start "${{ inputs.oos_start }}" \
+            --oos-end "${{ inputs.oos_end }}" \
+            --output artifacts/phase6/phase6_evaluation.json
+
+      - name: Verify Production Gate Decision Is Fail-Closed
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("artifacts/phase6/phase6_evaluation.json").read_text(encoding="utf-8"))
+          candidate = report["candidate"]
+          gates = candidate["production_gates"]
+
+          if candidate["eligible_for_production_reintroduction"] != gates["passed"]:
+              raise SystemExit("Eligibility flag does not match production gate result")
+          if report["provenance"]["baseline_control_frozen"] is not True:
+              raise SystemExit("Phase 4 control is not marked frozen")
+          if report["provenance"]["baseline_recomputed"] is not False:
+              raise SystemExit("Phase 4 control was recomputed")
+          if report["provenance"]["ai_dependency_in_production"] is not False:
+              raise SystemExit("Phase 6 introduced a production AI dependency")
+
+          print("Phase 6 evaluation harness verified")
+          print(f"AI production gate: {'PASS' if gates['passed'] else 'FAIL'}")
+          PY
+
+      - name: Upload Phase 6 Evaluation
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: phase6-evaluation-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 30
+          path: artifacts/phase6
