@@ -9,24 +9,52 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-code-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.11'
+  PYTHONUNBUFFERED: '1'
+
 jobs:
   lint-and-test:
+    name: Lint and Test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
           cache-dependency-path: requirements.txt
 
+      - name: Verify Package Structures
+        run: |
+          set -euo pipefail
+          required_files=(
+            "core/__init__.py"
+            "models/__init__.py"
+            "utils/__init__.py"
+            "data/__init__.py"
+          )
+          for path in "${required_files[@]}"; do
+            if [[ ! -f "$path" ]]; then
+              echo "::error title=Repository integrity failure::$path is missing"
+              exit 1
+            fi
+          done
+
       - name: Install Dependencies
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
 
       - name: Syntax and Undefined-Name Checks
         run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
