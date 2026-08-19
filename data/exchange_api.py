@@ -85,6 +85,11 @@ class ExchangeInterface:
             }
         )
 
+    @staticmethod
+    def _exchange_name(exchange: Any, default: str = "bitget") -> str:
+        """Return a stable exchange name without requiring a CCXT ``id`` attribute."""
+        return str(getattr(exchange, "id", default))
+
     def _activate_fallback(self, reason: Exception) -> None:
         if not self.fallback_enabled or self.fallback is None:
             raise RuntimeError("XT.com fallback is disabled") from reason
@@ -201,7 +206,8 @@ class ExchangeInterface:
             self._ensure_markets(exchange)
             if symbol not in exchange.markets:
                 raise ValueError(
-                    f"Symbol {symbol} is not available on {exchange.id}"
+                    f"Symbol {symbol} is not available on "
+                    f"{self._exchange_name(exchange)}"
                 )
             raw = exchange.fetch_ohlcv(
                 symbol,
@@ -216,7 +222,7 @@ class ExchangeInterface:
             if frame.empty:
                 raise ValueError(
                     f"No closed candles available for {symbol} {timeframe} "
-                    f"on {exchange.id}"
+                    f"on {self._exchange_name(exchange)}"
                 )
             return frame
 
@@ -237,9 +243,10 @@ class ExchangeInterface:
 
         def fetch_history(exchange: Any) -> pd.DataFrame:
             self._ensure_markets(exchange)
+            exchange_name = self._exchange_name(exchange)
             if symbol not in exchange.markets:
                 raise ValueError(
-                    f"Symbol {symbol} is not available on {exchange.id}"
+                    f"Symbol {symbol} is not available on {exchange_name}"
                 )
 
             timeframe_ms = exchange.parse_timeframe(timeframe) * 1000
@@ -262,7 +269,7 @@ class ExchangeInterface:
 
                 if until in seen_until:
                     raise RuntimeError(
-                        f"Bitget pagination cursor stopped progressing for "
+                        f"{exchange_name} pagination cursor stopped progressing for "
                         f"{symbol} {timeframe}: until={until}"
                     )
                 seen_until.add(until)
@@ -286,7 +293,7 @@ class ExchangeInterface:
                 new_timestamps = batch_timestamps.difference(seen_timestamps)
                 if not new_timestamps:
                     raise RuntimeError(
-                        f"Bitget pagination returned no new candles for "
+                        f"{exchange_name} pagination returned no new candles for "
                         f"{symbol} {timeframe} at until={until}"
                     )
 
@@ -297,7 +304,7 @@ class ExchangeInterface:
                 next_until = oldest - timeframe_ms
                 if next_until >= until:
                     raise RuntimeError(
-                        f"Bitget pagination cursor moved forward for "
+                        f"{exchange_name} pagination cursor moved forward for "
                         f"{symbol} {timeframe}: {until} -> {next_until}"
                     )
                 until = next_until
@@ -311,7 +318,7 @@ class ExchangeInterface:
             if len(frame) < candles:
                 raise RuntimeError(
                     f"Incomplete closed-candle history for {symbol} {timeframe} "
-                    f"on {exchange.id}: requested={candles} "
+                    f"on {exchange_name}: requested={candles} "
                     f"received={len(frame)} pages={pages}"
                 )
 
@@ -326,7 +333,7 @@ class ExchangeInterface:
 
             self.logger.info(
                 "%s returned %d closed candles for %s %s; requested %d; pages=%d.",
-                exchange.id,
+                exchange_name,
                 len(frame),
                 symbol,
                 timeframe,
