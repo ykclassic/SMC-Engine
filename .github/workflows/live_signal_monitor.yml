@@ -12,7 +12,7 @@ env:
   PYTHON_VERSION: "3.11"
   PYTHONUNBUFFERED: "1"
   PYTHONPATH: "."
-  EXCHANGE: "xt"
+  EXCHANGE: "bitget"
 
 concurrency:
   group: smc-live-signal-monitor
