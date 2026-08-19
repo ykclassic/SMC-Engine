@@ -76,10 +76,6 @@ class IncompleteBitget(FakeBitget):
                 "limit": limit,
             }
         )
-        until = (params or {}).get("until")
-        # Return the same single candle on every request. This models an
-        # exchange that cannot provide any additional historical data and
-        # allows the adapter's no-progress invariant to fail closed.
         timestamp = 1_700_000_000_000
         return [
             [timestamp, 100.0, 101.0, 99.0, 100.5, 10.0],
@@ -91,9 +87,76 @@ def test_history_fails_closed_when_exchange_cannot_supply_requested_history():
     interface.logger = logging.getLogger("test")
     interface.exchange = IncompleteBitget()
 
-    with pytest.raises(RuntimeError, match="Incomplete closed-candle history|no new candles"):
+    with pytest.raises(
+        RuntimeError,
+        match="Incomplete closed-candle history|no new candles",
+    ):
         interface.fetch_ohlcv_history(
             "BTC/USDT:USDT",
             "15m",
             candles=5,
         )
+
+
+def test_history_requests_are_capped_per_page_and_exactly_trimmed():
+    class PagedBitget:
+        markets = {"BTC/USDT:USDT": {}}
+
+        def __init__(self):
+            self.calls = []
+
+        @staticmethod
+        def parse_timeframe(timeframe):
+            return 86_400
+
+        def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None, params=None):
+            until = int((params or {}).get("until"))
+            self.calls.append((limit, until))
+            page = limit
+            start = until - page * 86_400_000
+            return [
+                [
+                    start + index * 86_400_000,
+                    100.0,
+                    101.0,
+                    99.0,
+                    100.5,
+                    10.0,
+                ]
+                for index in range(page)
+            ]
+
+    interface = ExchangeInterface.__new__(ExchangeInterface)
+    interface.logger = logging.getLogger("test")
+    interface.exchange = PagedBitget()
+
+    frame = interface.fetch_ohlcv_history(
+        "BTC/USDT:USDT",
+        "1d",
+        candles=250,
+    )
+
+    assert len(frame) == 250
+    assert len(interface.exchange.calls) == 2
+    assert all(limit == 200 for limit, _ in interface.exchange.calls[:1])
+    assert interface.exchange.calls[1][0] == 200
+    assert frame["timestamp"].is_monotonic_increasing
+
+
+def test_history_does_not_use_fallback_when_disabled():
+    interface = ExchangeInterface.__new__(ExchangeInterface)
+    interface.logger = logging.getLogger("test")
+    interface.exchange = IncompleteBitget()
+    interface.active_name = "bitget"
+    interface.primary_name = "bitget"
+    interface.fallback_enabled = False
+    interface.fallback = None
+
+    with pytest.raises(RuntimeError):
+        interface.fetch_ohlcv_history(
+            "BTC/USDT:USDT",
+            "15m",
+            candles=5,
+        )
+
+    assert interface.active_name == "bitget"
