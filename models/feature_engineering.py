@@ -190,7 +190,7 @@ class FeatureEngineer:
                 result.at[i, "fvg_age"] = float(i - origin)
                 result.at[i, "fvg_distance_atr"] = distance
                 result.at[i, "fvg_fill_ratio"] = float(fill)
-                if fill >= 1.0:
+                if fill >= 1.0 and i > origin:
                     active_fvg = None
 
             ob_event = frame.at[i, "ob_event"] if "ob_event" in frame else None
@@ -219,10 +219,9 @@ class FeatureEngineer:
                 result.at[i, "ob_age"] = float(i - origin)
                 result.at[i, "ob_distance_atr"] = abs(close - midpoint) / atr_value
 
-                if low <= bottom or high >= top:
-                    # The current candle has interacted with the zone. Keep
-                    # the feature on this candle, then retire the zone so
-                    # future rows cannot treat an already-consumed OB as live.
+                # The event candle establishes the OB and therefore must
+                # always expose age=0. Only later candles may consume it.
+                if i > origin and (low <= bottom or high >= top):
                     active_ob = None
 
             pool = frame.at[i, "liquidity_pool"] if "liquidity_pool" in frame else None
@@ -307,8 +306,6 @@ class FeatureEngineer:
             frame["liquidity_sweep"], "BULLISH_SWEEP", "BEARISH_SWEEP"
         )
 
-        # Retain the original point-in-time zone feature for backward
-        # interpretability. Persistent FVG geometry is represented separately.
         fvg_mid = (
             frame.get("fvg_top", pd.Series(np.nan, index=frame.index))
             + frame.get("fvg_bottom", pd.Series(np.nan, index=frame.index))
