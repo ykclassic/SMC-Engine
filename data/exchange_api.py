@@ -250,13 +250,19 @@ class ExchangeInterface:
                 )
 
             timeframe_ms = exchange.parse_timeframe(timeframe) * 1000
-            page_size = min(1000, candles)
+            # Bitget's historical candle endpoint documents a maximum of 200
+            # records per request. Keeping the unified request at that size
+            # avoids relying on a larger CCXT limit that the exchange may
+            # silently clamp.
+            page_size = min(200, candles)
             until = int(datetime.now(timezone.utc).timestamp() * 1000)
             rows: list[list] = []
             seen_timestamps: set[int] = set()
             seen_until: set[int] = set()
             pages = 0
-            max_pages = max(20, (candles // page_size) + 10)
+            required_pages = (candles + page_size - 1) // page_size
+            # Allow a small bounded margin for boundary/open-candle effects.
+            max_pages = max(20, required_pages + 5)
 
             while pages < max_pages:
                 frame = self._drop_open_candle(
@@ -319,7 +325,7 @@ class ExchangeInterface:
                 raise RuntimeError(
                     f"Incomplete closed-candle history for {symbol} {timeframe} "
                     f"on {exchange_name}: requested={candles} "
-                    f"received={len(frame)} pages={pages}"
+                    f"received={len(frame)} pages={pages} max_pages={max_pages}"
                 )
 
             if len(frame) > candles:
