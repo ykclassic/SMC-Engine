@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import pandas as pd
@@ -54,8 +54,10 @@ def resolve_signal(signal: Any, future_bars: pd.DataFrame) -> TradeOutcome:
         return _unresolved(signal)
 
     frame = future_bars.copy()
-    if "timestamp" not in frame.columns or not {"high", "low"}.issubset(frame.columns):
+    required_columns = {"timestamp", "high", "low"}
+    if not required_columns.issubset(frame.columns):
         raise ValueError("future_bars must contain timestamp, high, and low columns")
+
     frame["_ts"] = frame["timestamp"].map(_timestamp)
     frame = frame.loc[frame["_ts"] > signal_time].sort_values("_ts")
 
@@ -63,9 +65,20 @@ def resolve_signal(signal: Any, future_bars: pd.DataFrame) -> TradeOutcome:
     reward = abs(target - entry)
     target_r = reward / risk
 
-    for row in frame.itertuples(index=False):
-        high = float(row.high)
-        low = float(row.low)
+    # Use positional tuples so the private helper column name cannot be
+    # rewritten by pandas' namedtuple field sanitisation.
+    for timestamp, high, low in frame[["_ts", "high", "low"]].itertuples(
+        index=False, name=None
+    ):
+        timestamp = pd.Timestamp(timestamp)
+        high = float(high)
+        low = float(low)
+
+        if high < low:
+            raise ValueError(
+                f"Invalid OHLC row at {timestamp.isoformat()}: high={high} < low={low}"
+            )
+
         if side == "LONG":
             stop_hit = low <= stop
             target_hit = high >= target
@@ -77,7 +90,7 @@ def resolve_signal(signal: Any, future_bars: pd.DataFrame) -> TradeOutcome:
             return TradeOutcome(
                 signal_id=str(signal.signal_id),
                 signal_timestamp=signal_time.isoformat(),
-                resolution_timestamp=row._ts.isoformat(),
+                resolution_timestamp=timestamp.isoformat(),
                 symbol=str(signal.symbol),
                 side=side,
                 entry=entry,
@@ -87,14 +100,19 @@ def resolve_signal(signal: Any, future_bars: pd.DataFrame) -> TradeOutcome:
                 r_multiple=-1.0,
             )
         if stop_hit:
-            return _resolved(signal, row._ts, "LOSS", -1.0)
+            return _resolved(signal, timestamp, "LOSS", -1.0)
         if target_hit:
-            return _resolved(signal, row._ts, "WIN", target_r)
+            return _resolved(signal, timestamp, "WIN", target_r)
 
     return _unresolved(signal)
 
 
-def _resolved(signal: Any, timestamp: pd.Timestamp, outcome: str, r_multiple: float) -> TradeOutcome:
+def _resolved(
+    signal: Any,
+    timestamp: pd.Timestamp,
+    outcome: str,
+    r_multiple: float,
+) -> TradeOutcome:
     return TradeOutcome(
         signal_id=str(signal.signal_id),
         signal_timestamp=_timestamp(signal.timestamp).isoformat(),
@@ -125,6 +143,7 @@ def _unresolved(signal: Any) -> TradeOutcome:
 
 
 def calculate_performance(outcomes: list[TradeOutcome]) -> dict[str, Any]:
+    """Calculate deterministic performance statistics in R-multiple space."""
     resolved = [o for o in outcomes if o.outcome in {"WIN", "LOSS"}]
     wins = [o for o in resolved if o.outcome == "WIN"]
     losses = [o for o in resolved if o.outcome == "LOSS"]
@@ -152,7 +171,11 @@ def calculate_performance(outcomes: list[TradeOutcome]) -> dict[str, Any]:
         "win_rate": len(wins) / resolved_count if resolved_count else 0.0,
         "net_r": sum(r_values),
         "expectancy_r": sum(r_values) / resolved_count if resolved_count else 0.0,
-        "profit_factor": gross_profit / gross_loss if gross_loss else (float("inf") if gross_profit else 0.0),
+        "profit_factor": (
+            gross_profit / gross_loss
+            if gross_loss
+            else (float("inf") if gross_profit else 0.0)
+        ),
         "max_drawdown_r": max_drawdown,
         "long_trades": sum(o.side == "LONG" for o in resolved),
         "short_trades": sum(o.side == "SHORT" for o in resolved),
