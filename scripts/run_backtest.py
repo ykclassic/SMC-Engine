@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
@@ -17,6 +18,10 @@ from utils.config_loader import load_all_configs
 
 def run_backtest_session() -> int:
     config = load_all_configs(require_secrets=False)
+    config = copy.deepcopy(config)
+    config["model"]["enabled"] = False
+    config["model"]["required"] = False
+
     exchange = ExchangeInterface(config)
     symbol = config["trading"]["symbols"][0]
     tf = config["market_data"]["timeframes"]
@@ -73,6 +78,8 @@ def run_backtest_session() -> int:
     performance["timeframe"] = tf["m15"]
     performance["strategy"] = "deterministic_smc"
     performance["ai_dependency"] = False
+    performance["ai_enabled"] = False
+    performance["model_artifacts_required"] = False
 
     outcome_rows = [outcome.to_dict() for outcome in outcomes]
     results = pd.DataFrame(outcome_rows)
