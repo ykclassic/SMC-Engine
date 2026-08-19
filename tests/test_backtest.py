@@ -24,10 +24,12 @@ def _future(rows: list[tuple[str, float, float]]) -> pd.DataFrame:
 def test_resolve_long_target_without_future_leakage() -> None:
     outcome = resolve_signal(
         _signal("LONG"),
-        _future([
-            ("2026-01-01 00:15:00", 100.5, 99.5),
-            ("2026-01-01 00:30:00", 102.1, 100.0),
-        ]),
+        _future(
+            [
+                ("2026-01-01 00:15:00", 100.5, 99.5),
+                ("2026-01-01 00:30:00", 102.1, 100.0),
+            ]
+        ),
     )
     assert outcome.outcome == "WIN"
     assert outcome.r_multiple == 2.0
@@ -37,10 +39,12 @@ def test_resolve_long_target_without_future_leakage() -> None:
 def test_resolve_short_stop_and_target_correctly() -> None:
     outcome = resolve_signal(
         _signal("SHORT"),
-        _future([
-            ("2026-01-01 00:15:00", 100.5, 99.5),
-            ("2026-01-01 00:30:00", 98.0, 99.0),
-        ]),
+        _future(
+            [
+                ("2026-01-01 00:15:00", 100.5, 99.5),
+                ("2026-01-01 00:30:00", 99.0, 98.0),
+            ]
+        ),
     )
     assert outcome.outcome == "WIN"
     assert outcome.r_multiple == 2.0
@@ -76,9 +80,18 @@ def test_unresolved_trade_is_explicit() -> None:
 
 def test_performance_metrics_are_r_based() -> None:
     outcomes = [
-        resolve_signal(_signal("LONG"), _future([("2026-01-01 00:15:00", 102.0, 100.0)])),
-        resolve_signal(_signal("SHORT"), _future([("2026-01-01 00:15:00", 101.0, 99.0)])),
-        resolve_signal(_signal("LONG"), _future([("2026-01-01 00:15:00", 100.5, 99.0)])),
+        resolve_signal(
+            _signal("LONG"),
+            _future([("2026-01-01 00:15:00", 102.0, 100.0)]),
+        ),
+        resolve_signal(
+            _signal("SHORT"),
+            _future([("2026-01-01 00:15:00", 101.0, 99.0)]),
+        ),
+        resolve_signal(
+            _signal("LONG"),
+            _future([("2026-01-01 00:15:00", 100.5, 99.0)]),
+        ),
     ]
     metrics = calculate_performance(outcomes)
     assert metrics["total_signals"] == 3
