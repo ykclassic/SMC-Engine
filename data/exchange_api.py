@@ -115,9 +115,12 @@ class ExchangeInterface:
                 "active_name",
                 getattr(self, "primary_name", "bitget"),
             )
+            fallback_enabled = bool(
+                getattr(self, "fallback_enabled", False)
+            )
             if active_name != "bitget":
                 raise
-            if not self.fallback_enabled:
+            if not fallback_enabled:
                 raise
             self.logger.error(
                 "Bitget %s failed: %s. Failing over to XT.com.",
@@ -228,14 +231,7 @@ class ExchangeInterface:
         timeframe: str,
         candles: int = 5000,
     ) -> pd.DataFrame:
-        """Fetch exactly ``candles`` closed candles using backward pagination.
-
-        The loop evaluates completeness after removing the current open candle.
-        This prevents the common ``requested N -> returned N-1`` failure when
-        the exchange includes the still-forming candle in the final page.
-        Short pages do not terminate pagination; the cursor advances from the
-        oldest unique candle returned by each page.
-        """
+        """Fetch exactly ``candles`` closed candles using backward pagination."""
 
         candles = max(1, int(candles))
 
@@ -288,7 +284,6 @@ class ExchangeInterface:
                     if row and row[0] is not None
                 }
                 new_timestamps = batch_timestamps.difference(seen_timestamps)
-
                 if not new_timestamps:
                     raise RuntimeError(
                         f"Bitget pagination returned no new candles for "
