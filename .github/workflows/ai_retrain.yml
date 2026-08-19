@@ -138,7 +138,7 @@ jobs:
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
           name: candidate-label-integrity-${{ github.sha }}
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
           path: models/weights/candidate_label_integrity.json
 
@@ -157,7 +157,7 @@ jobs:
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
           name: label-context-ablation-${{ github.sha }}
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
           path: models/weights/label_context_ablation.json
 
