@@ -7,9 +7,9 @@ remain usable for precision-oriented threshold calibration.
 
 When ``--experiment-mode`` is supplied, the exact same training, validation,
 and test loops are executed, but a failing production gate is recorded in an
-experiment-results JSON artifact instead of terminating the process. This mode
-is intended for controlled ablation/diagnostic experiments only and never
-changes the production gate itself.
+experiment-results JSON artifact instead of terminating the process. Experiment
+artifacts are written beside that JSON output and never overwrite production
+model paths.
 """
 
 from __future__ import annotations
@@ -62,7 +62,6 @@ def _parse_args() -> argparse.Namespace:
 def _write_experiment_results(
     output_path: Path,
     *,
-    experiment_mode: bool,
     gate_passed: bool,
     rejection_reason: str | None,
     threshold: float,
@@ -80,7 +79,7 @@ def _write_experiment_results(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": "integrity-training-experiment-v1",
-        "experiment_mode": experiment_mode,
+        "experiment_mode": True,
         "gate_passed": gate_passed,
         "rejection_reason": rejection_reason,
         "decision_threshold": float(threshold),
@@ -121,7 +120,12 @@ def _write_experiment_results(
     print(f"Experiment evaluation written: {output_path}")
 
 
-def train(config: dict, *, experiment_mode: bool = False, output_path: Path | None = None) -> None:
+def train(
+    config: dict,
+    *,
+    experiment_mode: bool = False,
+    output_path: Path | None = None,
+) -> None:
     (
         X_train,
         C_train,
@@ -184,7 +188,9 @@ def train(config: dict, *, experiment_mode: bool = False, output_path: Path | No
                 torch.full_like(y_train, positive_weight),
                 torch.ones_like(y_train),
             )
-            loss = (nn.BCELoss(reduction="none")(predictions, y_train) * weights).mean()
+            loss = (
+                nn.BCELoss(reduction="none")(predictions, y_train) * weights
+            ).mean()
 
         if not torch.isfinite(loss):
             raise RuntimeError("Training loss became non-finite")
@@ -298,9 +304,9 @@ def train(config: dict, *, experiment_mode: bool = False, output_path: Path | No
         )
 
     if experiment_mode:
+        experiment_output = output_path or Path("artifacts/ablation_results.json")
         _write_experiment_results(
-            output_path or Path("artifacts/ablation_results.json"),
-            experiment_mode=True,
+            experiment_output,
             gate_passed=gate_passed,
             rejection_reason=rejection_reason,
             threshold=threshold,
@@ -319,12 +325,17 @@ def train(config: dict, *, experiment_mode: bool = False, output_path: Path | No
             print(f"WARNING: {rejection_reason}")
         else:
             print("Experiment model passed the production evaluation gate.")
-    elif not gate_passed:
-        raise RuntimeError(rejection_reason or "Model rejected by production gate")
 
-    weights_path = Path(cfg["path"])
-    scaler_path = Path(cfg["scaler_path"])
-    metadata_path = Path(cfg["metadata_path"])
+        weights_path = experiment_output.with_name("experiment_model.pt")
+        scaler_path = experiment_output.with_name("experiment_scaler.pkl")
+        metadata_path = experiment_output.with_name("experiment_model_metadata.json")
+    else:
+        if not gate_passed:
+            raise RuntimeError(rejection_reason or "Model rejected by production gate")
+        weights_path = Path(cfg["path"])
+        scaler_path = Path(cfg["scaler_path"])
+        metadata_path = Path(cfg["metadata_path"])
+
     weights_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), weights_path)
     engineer.save_scaler(str(scaler_path))
@@ -360,8 +371,6 @@ def train(config: dict, *, experiment_mode: bool = False, output_path: Path | No
         "training_positive_weight": positive_weight,
         "training_positive_rate": positive / (positive + negative),
         "training_loss": "bce" if positive_weight == 1.0 else "weighted_bce",
-        "experiment_mode": experiment_mode,
-        "evaluation_gate_passed": gate_passed,
     }
     metadata["model_sha256"] = sha256_file(weights_path)
     metadata["scaler_sha256"] = sha256_file(scaler_path)
