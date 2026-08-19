@@ -11,9 +11,9 @@ import pandas as pd
 class ExchangeInterface:
     """Market-data adapter with Bitget primary and XT.com failover.
 
-    Bitget remains the authoritative exchange. XT.com is used only when the
-    primary exchange cannot initialize or a public market-data request fails.
-    The adapter never silently changes the configured primary credentials.
+    Bitget remains the authoritative exchange. XT.com is available only when
+    the configured failover policy permits it. Account balance operations are
+    intentionally Bitget-only because exchange accounts are independent.
     """
 
     def __init__(self, config: dict) -> None:
@@ -25,6 +25,9 @@ class ExchangeInterface:
             "fallback_exchange",
             "xt",
         ).lower()
+        self.fallback_enabled = bool(
+            trading.get("fallback_exchange_enabled", False)
+        )
 
         if self.primary_name != "bitget":
             raise ValueError(
@@ -43,12 +46,15 @@ class ExchangeInterface:
             password=config.get("passphrase"),
         )
 
-        self.fallback = self._build_exchange(
-            "xt",
-            api_key=config.get("fallback_api_key"),
-            secret=config.get("fallback_api_secret"),
-            password=config.get("fallback_passphrase"),
-        )
+        self.fallback = None
+
+        if self.fallback_enabled:
+            self.fallback = self._build_exchange(
+                "xt",
+                api_key=config.get("fallback_api_key"),
+                secret=config.get("fallback_api_secret"),
+                password=config.get("fallback_passphrase"),
+            )
 
         self.exchange = self.primary
         self.active_name = "bitget"
@@ -60,6 +66,11 @@ class ExchangeInterface:
                 len(self.primary.markets),
             )
         except Exception as exc:
+            if not self.fallback_enabled:
+                raise RuntimeError(
+                    "Bitget initialization failed and XT.com failover is disabled"
+                ) from exc
+
             self.logger.error(
                 "Bitget initialization failed: %s. Attempting XT.com fallback.",
                 exc,
@@ -91,6 +102,11 @@ class ExchangeInterface:
         return exchange_class(credentials)
 
     def _activate_fallback(self, reason: Exception) -> None:
+        if not self.fallback_enabled or self.fallback is None:
+            raise RuntimeError(
+                "XT.com fallback is disabled"
+            ) from reason
+
         try:
             self.fallback.load_markets()
         except Exception as fallback_exc:
@@ -115,7 +131,16 @@ class ExchangeInterface:
         try:
             return callback(self.exchange)
         except Exception as primary_exc:
-            if self.active_name != "bitget":
+            active_name = getattr(
+                self,
+                "active_name",
+                getattr(self, "primary_name", "bitget"),
+            )
+
+            if active_name != "bitget":
+                raise
+
+            if not self.fallback_enabled:
                 raise
 
             self.logger.error(
@@ -252,7 +277,13 @@ class ExchangeInterface:
         timeframe: str,
         candles: int = 5000,
     ) -> pd.DataFrame:
-        """Fetch closed OHLCV history with exchange-neutral pagination."""
+        """Fetch closed OHLCV history using backward pagination.
+
+        Pagination deliberately continues after a short page. Some exchanges
+        return fewer rows than requested even when older candles remain
+        available. Each subsequent request moves the upper time boundary
+        backwards from the oldest candle returned by the previous page.
+        """
 
         candles = max(1, int(candles))
 
@@ -268,24 +299,24 @@ class ExchangeInterface:
                 exchange.parse_timeframe(timeframe) * 1000
             )
             page_size = min(1000, candles)
-            since = int(
+            until = int(
                 datetime.now(timezone.utc).timestamp() * 1000
-            ) - (candles * timeframe_ms)
+            )
 
             rows: list[list] = []
-            seen_starts: set[int] = set()
+            seen_until: set[int] = set()
 
             while len(rows) < candles:
-                if since in seen_starts:
+                if until in seen_until:
                     break
 
-                seen_starts.add(since)
+                seen_until.add(until)
 
                 batch = exchange.fetch_ohlcv(
                     symbol,
                     timeframe,
-                    since=since,
                     limit=page_size,
+                    params={"until": until},
                 )
 
                 if not batch:
@@ -293,16 +324,13 @@ class ExchangeInterface:
 
                 rows.extend(batch)
 
-                newest = max(int(row[0]) for row in batch)
-                next_since = newest + timeframe_ms
+                oldest = min(int(row[0]) for row in batch)
+                next_until = oldest - timeframe_ms
 
-                if next_since <= since:
+                if next_until >= until:
                     break
 
-                since = next_since
-
-                if len(batch) < page_size:
-                    break
+                until = next_until
 
             frame = self._drop_open_candle(
                 self._normalize(rows),
