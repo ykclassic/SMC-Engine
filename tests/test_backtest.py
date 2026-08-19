@@ -42,7 +42,7 @@ def test_resolve_short_stop_and_target_correctly() -> None:
         _future(
             [
                 ("2026-01-01 00:15:00", 100.5, 99.5),
-                ("2026-01-01 00:30:00", 99.0, 98.0),
+                ("2026-01-01 00:30:00", 100.0, 98.0),
             ]
         ),
     )
@@ -86,7 +86,7 @@ def test_performance_metrics_are_r_based() -> None:
         ),
         resolve_signal(
             _signal("SHORT"),
-            _future([("2026-01-01 00:15:00", 101.0, 99.0)]),
+            _future([("2026-01-01 00:15:00", 100.0, 98.0)]),
         ),
         resolve_signal(
             _signal("LONG"),
