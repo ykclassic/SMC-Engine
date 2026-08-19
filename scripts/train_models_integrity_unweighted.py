@@ -4,10 +4,17 @@ The production precision gate remains unchanged. This entry point reuses the
 canonical dataset, causal partitioning, threshold diagnostics, and OOS gates
 from train_models_integrity.py, but trains with ordinary BCE so probabilities
 remain usable for precision-oriented threshold calibration.
+
+When ``--experiment-mode`` is supplied, the exact same training, validation,
+and test loops are executed, but a failing production gate is recorded in an
+experiment-results JSON artifact instead of terminating the process. This mode
+is intended for controlled ablation/diagnostic experiments only and never
+changes the production gate itself.
 """
 
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 import json
 from pathlib import Path
@@ -25,7 +32,96 @@ from scripts.train_models_integrity import _build_partitions, _f1, _select_thres
 from utils.config_loader import load_all_configs
 
 
-def train(config: dict) -> None:
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Train and evaluate the integrity GRU."
+    )
+    parser.add_argument(
+        "--experiment-mode",
+        action="store_true",
+        help=(
+            "Run the normal training/validation/test loops but do not fail "
+            "the process when the production test gate rejects the model. "
+            "Evaluation metrics are written to --output."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Alias for --experiment-mode.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("artifacts/ablation_results.json"),
+        help="Path for the experiment evaluation JSON artifact.",
+    )
+    return parser.parse_args()
+
+
+def _write_experiment_results(
+    output_path: Path,
+    *,
+    experiment_mode: bool,
+    gate_passed: bool,
+    rejection_reason: str | None,
+    threshold: float,
+    validation_f1: float,
+    val_metrics: dict,
+    test_metrics: dict,
+    window_diagnostics: list[dict],
+    minimum_auc: float,
+    minimum_precision: float,
+    minimum_coverage: float,
+    positive_weight: float,
+    training_positive_rate: float,
+    statistics: list[dict],
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": "integrity-training-experiment-v1",
+        "experiment_mode": experiment_mode,
+        "gate_passed": gate_passed,
+        "rejection_reason": rejection_reason,
+        "decision_threshold": float(threshold),
+        "validation_f1_at_threshold": float(validation_f1),
+        "validation": {
+            **val_metrics,
+            "f1": _f1(val_metrics),
+        },
+        "test": {
+            **test_metrics,
+            "f1": _f1(test_metrics),
+        },
+        "validation_windows": window_diagnostics,
+        "gates": {
+            "minimum_test_auc": minimum_auc,
+            "minimum_test_precision": minimum_precision,
+            "minimum_coverage": minimum_coverage,
+        },
+        "training": {
+            "positive_weight": positive_weight,
+            "positive_rate": training_positive_rate,
+        },
+        "feature_version": FEATURE_VERSION,
+        "feature_columns": FEATURE_COLUMNS,
+        "candidate_context_version": CONTEXT_VERSION,
+        "candidate_context_columns": list(CONTEXT_COLUMNS),
+        "trained_symbols": [item["symbol"] for item in statistics],
+        "total_labeled_candidates": int(
+            sum(item["labeled_candidates"] for item in statistics)
+        ),
+        "symbol_statistics": statistics,
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+    output_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    print(f"Experiment evaluation written: {output_path}")
+
+
+def train(config: dict, *, experiment_mode: bool = False, output_path: Path | None = None) -> None:
     (
         X_train,
         C_train,
@@ -187,17 +283,44 @@ def train(config: dict) -> None:
     )
 
     minimum_auc = float(cfg.get("minimum_test_auc", 0.55))
-    if (
-        test_metrics["roc_auc"] < minimum_auc
-        or test_metrics["precision"] < minimum_precision
-    ):
-        raise RuntimeError(
+    gate_passed = (
+        test_metrics["roc_auc"] >= minimum_auc
+        and test_metrics["precision"] >= minimum_precision
+    )
+    rejection_reason = None
+    if not gate_passed:
+        rejection_reason = (
             f"Model rejected at frozen validation threshold {threshold:.4f}: "
             f"roc_auc={test_metrics['roc_auc']:.4f} "
             f"required>={minimum_auc:.4f}; "
             f"precision={test_metrics['precision']:.4f} "
             f"required>={minimum_precision:.4f}"
         )
+
+    if experiment_mode:
+        _write_experiment_results(
+            output_path or Path("artifacts/ablation_results.json"),
+            experiment_mode=True,
+            gate_passed=gate_passed,
+            rejection_reason=rejection_reason,
+            threshold=threshold,
+            validation_f1=validation_f1,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+            window_diagnostics=window_diagnostics,
+            minimum_auc=minimum_auc,
+            minimum_precision=minimum_precision,
+            minimum_coverage=minimum_coverage,
+            positive_weight=positive_weight,
+            training_positive_rate=positive / (positive + negative),
+            statistics=statistics,
+        )
+        if not gate_passed:
+            print(f"WARNING: {rejection_reason}")
+        else:
+            print("Experiment model passed the production evaluation gate.")
+    elif not gate_passed:
+        raise RuntimeError(rejection_reason or "Model rejected by production gate")
 
     weights_path = Path(cfg["path"])
     scaler_path = Path(cfg["scaler_path"])
@@ -237,6 +360,8 @@ def train(config: dict) -> None:
         "training_positive_weight": positive_weight,
         "training_positive_rate": positive / (positive + negative),
         "training_loss": "bce" if positive_weight == 1.0 else "weighted_bce",
+        "experiment_mode": experiment_mode,
+        "evaluation_gate_passed": gate_passed,
     }
     metadata["model_sha256"] = sha256_file(weights_path)
     metadata["scaler_sha256"] = sha256_file(scaler_path)
@@ -248,4 +373,9 @@ def train(config: dict) -> None:
 
 
 if __name__ == "__main__":
-    train(load_all_configs(require_notifications=False))
+    args = _parse_args()
+    train(
+        load_all_configs(require_notifications=False),
+        experiment_mode=args.experiment_mode or args.dry_run,
+        output_path=args.output,
+    )
