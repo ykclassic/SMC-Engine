@@ -21,7 +21,7 @@ class TradingSignal:
     h1_setup: str
     m15_trigger: str
     confluence_score: float
-    ai_confidence: float
+    ai_confidence: float | None
     reason: str
 
     def to_dict(self) -> dict[str, Any]:
