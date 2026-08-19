@@ -27,7 +27,7 @@ env:
   PYTHON_VERSION: '3.11'
   PYTHONUNBUFFERED: '1'
   PYTHONPATH: '.'
-  EXCHANGE: 'xt'
+  EXCHANGE: 'bitget'
 
 jobs:
   deploy:
@@ -157,7 +157,6 @@ jobs:
         run: |
           set -euo pipefail
           deadline=$((SECONDS + 1800))
-          terminal_failure='build_failed|update_failed|pre_deploy_failed|canceled|deactivated'
 
           while (( SECONDS < deadline )); do
             response="$(curl --silent --show-error --fail \
@@ -231,7 +230,8 @@ jobs:
             echo ""
             echo "- Commit: \`${GITHUB_SHA}\`"
             echo "- Workflow: \`${GITHUB_RUN_ID}\`"
-            echo "- Exchange default: \`${EXCHANGE}\`"
+            echo "- Primary exchange: \`${EXCHANGE}\`"
+            echo "- Fallback exchange: not enabled in this deployment phase"
             echo "- Render deploy ID: \`${RENDER_DEPLOY_ID:-not-created}\`"
             echo "- Reason: \`${{ inputs.deploy_reason || 'Automatic Push' }}\`"
             echo "- Deployment target: Render"
