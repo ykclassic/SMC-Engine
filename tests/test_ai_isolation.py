@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 WORKFLOW_DIR = Path(__file__).parents[1] / ".github" / "workflows"
+REQUIREMENTS_LIVE = Path(__file__).parents[1] / "requirements-live.txt"
 PRODUCTION_WORKFLOWS = (
     "backtest.yml",
     "deploy.yml",
@@ -53,6 +54,24 @@ def test_production_workflows_do_not_execute_ai_training() -> None:
         workflow = (WORKFLOW_DIR / filename).read_text(encoding="utf-8")
         for marker in forbidden:
             assert marker not in workflow, f"{filename} contains AI marker: {marker}"
+
+
+def test_live_runtime_requirements_are_ai_free() -> None:
+    requirements = REQUIREMENTS_LIVE.read_text(encoding="utf-8").lower()
+    forbidden = ("torch", "joblib", "scikit-learn", "sklearn", "transformers")
+    for marker in forbidden:
+        assert marker not in requirements, f"requirements-live.txt contains AI dependency: {marker}"
+
+
+def test_phase6_workflow_is_research_evaluation_only() -> None:
+    workflow = (WORKFLOW_DIR / "phase6_evaluation.yml").read_text(encoding="utf-8")
+    assert "Frozen Baseline vs AI OOS Evaluation" in workflow
+    assert "baseline_control_frozen" in workflow
+    assert "baseline_recomputed" in workflow
+    assert "ai_dependency_in_production" in workflow
+    assert "eligible_for_production_reintroduction" in workflow
+    assert "gh release create" not in workflow
+    assert "permissions:\n      contents: write" not in workflow
 
 
 def test_phase4_baseline_workflow_declares_ai_independence() -> None:
