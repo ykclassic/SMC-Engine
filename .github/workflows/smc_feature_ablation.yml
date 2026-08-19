@@ -1,0 +1,115 @@
+name: SMC Feature Ablation
+
+on:
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: "Training epochs per ablation experiment"
+        required: false
+        default: "20"
+        type: string
+      seed:
+        description: "Deterministic experiment seed"
+        required: false
+        default: "42"
+        type: string
+  push:
+    paths:
+      - "scripts/ablation_feature_groups.py"
+      - "tests/test_feature_ablation.py"
+      - "models/feature_engineering.py"
+      - "models/gru.py"
+      - "models/candidate_context.py"
+      - "scripts/train_models_integrity.py"
+      - "scripts/train_models.py"
+      - "configs/**"
+      - ".github/workflows/smc_feature_ablation.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smc-feature-ablation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ablation:
+    name: Controlled SMC feature ablation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f39ef2b9c
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          if [[ -f requirements.txt ]]; then
+            python -m pip install -r requirements.txt
+          elif [[ -f pyproject.toml ]]; then
+            python -m pip install .
+          else
+            echo "No supported dependency manifest found" >&2
+            exit 1
+          fi
+
+      - name: Run feature and ablation harness tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest -q tests/test_feature_engineering.py tests/test_feature_ablation.py
+
+      - name: Run controlled ablation
+        shell: bash
+        env:
+          ABLATION_EPOCHS: ${{ inputs.epochs || '20' }}
+          ABLATION_SEED: ${{ inputs.seed || '42' }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/feature_ablation
+          python scripts/ablation_feature_groups.py \
+            --epochs "${ABLATION_EPOCHS}" \
+            --seed "${ABLATION_SEED}" \
+            --output artifacts/feature_ablation/ablation_results.json
+
+      - name: Verify ablation report integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s artifacts/feature_ablation/ablation_results.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("artifacts/feature_ablation/ablation_results.json")
+          payload = json.loads(path.read_text(encoding="utf-8"))
+          required = {
+              "schema_version",
+              "selection_policy",
+              "experiments",
+              "validation_winner",
+              "validation_winner_features",
+              "selected_test_metrics",
+          }
+          missing = required.difference(payload)
+          if missing:
+              raise SystemExit(f"Ablation report missing keys: {sorted(missing)}")
+          if len(payload["experiments"]) != 5:
+              raise SystemExit(
+                  f"Expected 5 ablation experiments, got {len(payload['experiments'])}"
+              )
+          print(json.dumps(payload, indent=2, sort_keys=True))
+          PY
