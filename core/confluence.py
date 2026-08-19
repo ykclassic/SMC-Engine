@@ -14,6 +14,7 @@ class ConfluenceEngine:
     def __init__(self, config: dict) -> None:
         self.minimum_score = float(config["confluence"]["minimum_score"])
         self.weights = config["confluence"]["weights"]
+        self.ai_enabled = bool(config["model"].get("enabled", True))
         self.ai_engine = ModelInference(config)
         self.risk = RiskEngine(config)
         self.logger = logging.getLogger("SMC-Confluence")
@@ -51,7 +52,7 @@ class ConfluenceEngine:
         return {"top": float(top), "bottom": float(bottom)} if pd.notna(top) and pd.notna(bottom) else None
 
     def validate_signal(self, daily_df: pd.DataFrame, h4_df: pd.DataFrame, h1_df: pd.DataFrame, m15_df: pd.DataFrame):
-        diagnostic = {"decision": "REJECTED", "reason": "NO_SETUP"}
+        diagnostic = {"decision": "REJECTED", "reason": "NO_SETUP", "ai_enabled": self.ai_enabled}
         daily_bias = self._bias(daily_df)
         h4_bias = self._bias(h4_df)
         sweep_rows = m15_df.tail(3)[m15_df.tail(3)["liquidity_sweep"].notna()]
@@ -82,12 +83,19 @@ class ConfluenceEngine:
             diagnostic["reason"] = "CONFLUENCE_BELOW_THRESHOLD"
             return None, diagnostic
 
-        confidence = self.ai_engine.predict_confidence(m15_df)
-        diagnostic["ai_confidence"] = confidence
-        threshold = self.ai_engine.decision_threshold
-        if confidence < threshold:
-            diagnostic["reason"] = "AI_CONFIDENCE_BELOW_THRESHOLD"
-            return None, diagnostic
+        if self.ai_enabled:
+            confidence = self.ai_engine.predict_confidence(m15_df)
+            diagnostic["ai_confidence"] = confidence
+            threshold = self.ai_engine.decision_threshold
+            if confidence < threshold:
+                diagnostic["reason"] = "AI_CONFIDENCE_BELOW_THRESHOLD"
+                return None, diagnostic
+        else:
+            # TradingSignal keeps a numeric field for backwards compatibility.
+            # 1.0 is a sentinel only: no AI prediction was performed or used.
+            confidence = 1.0
+            diagnostic["ai_confidence"] = None
+            diagnostic["ai_bypass_reason"] = "AI_DISABLED_FOR_DETERMINISTIC_RUN"
 
         entry = float(sweep_rows.iloc[-1]["close"])
         atr = float(self.ai_engine.features._atr(m15_df).iloc[-1])
