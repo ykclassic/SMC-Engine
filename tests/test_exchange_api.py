@@ -1,6 +1,7 @@
 import logging
 
 import pandas as pd
+import pytest
 
 from data.exchange_api import ExchangeInterface
 
@@ -60,6 +61,35 @@ def test_history_pagination_continues_after_short_page():
     assert len(interface.exchange.calls) == 2
     assert interface.exchange.calls[1]["until"] < interface.exchange.calls[0]["until"]
     assert all(call["limit"] == 5 for call in interface.exchange.calls)
-
     assert list(frame["close"]) == [101.5, 102.0, 102.5, 100.5, 101.0]
     assert isinstance(frame["timestamp"].dtype, pd.DatetimeTZDtype)
+
+
+class IncompleteBitget(FakeBitget):
+    def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None, params=None):
+        self.calls.append(
+            {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "since": since,
+                "until": (params or {}).get("until"),
+                "limit": limit,
+            }
+        )
+        until = (params or {}).get("until")
+        return [
+            [until - 900_000, 100.0, 101.0, 99.0, 100.5, 10.0],
+        ]
+
+
+def test_history_fails_closed_when_exchange_cannot_supply_requested_history():
+    interface = ExchangeInterface.__new__(ExchangeInterface)
+    interface.logger = logging.getLogger("test")
+    interface.exchange = IncompleteBitget()
+
+    with pytest.raises(RuntimeError, match="Incomplete closed-candle history"):
+        interface.fetch_ohlcv_history(
+            "BTC/USDT:USDT",
+            "15m",
+            candles=5,
+        )
