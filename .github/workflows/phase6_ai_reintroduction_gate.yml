@@ -1,0 +1,88 @@
+name: Phase 6 AI Reintroduction Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: "Deterministic research epochs"
+        required: false
+        default: "20"
+        type: string
+      seed:
+        description: "Deterministic research seed"
+        required: false
+        default: "42"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase6-ai-reintroduction-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Evaluate AI candidate before reintroduction
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f39ef2b9c
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install research dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-train.txt
+
+      - name: Verify Phase 5 isolation first
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/verify_phase5_isolation.py
+
+      - name: Reproduce controlled AI candidate evaluation
+        shell: bash
+        env:
+          ABLATION_EPOCHS: ${{ inputs.epochs || '20' }}
+          ABLATION_SEED: ${{ inputs.seed || '42' }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/phase6_gate
+          python -m scripts.ablation_feature_groups \
+            --epochs "${ABLATION_EPOCHS}" \
+            --seed "${ABLATION_SEED}" \
+            --output artifacts/phase6_gate/ablation_results.json
+
+      - name: Apply hard production gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/evaluate_ai_candidate_gate.py \
+            --report artifacts/phase6_gate/ablation_results.json \
+            --output artifacts/phase6_gate/gate_result.json
+
+      - name: Upload Phase 6 gate evidence
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: phase6-ai-reintroduction-gate
+          path: artifacts/phase6_gate/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Explicitly prohibit promotion from this gate
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "All production gates passed. Phase 6 comparison may begin in a separate controlled change."
+          echo "No model artifact was promoted and no production configuration was changed."

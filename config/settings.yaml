@@ -69,8 +69,8 @@ confluence:
     m15_confirmation: 0.20
 
 model:
-  enabled: true
-  required: true
+  enabled: false
+  required: false
   path: models/weights/latest_gru.pth
   scaler_path: models/weights/feature_scaler.joblib
   metadata_path: models/weights/model_metadata.json
