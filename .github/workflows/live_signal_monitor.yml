@@ -8,36 +8,140 @@ on:
 permissions:
   contents: read
 
+env:
+  PYTHON_VERSION: "3.11"
+  PYTHONUNBUFFERED: "1"
+  PYTHONPATH: "."
+  EXCHANGE: "xt"
+
 concurrency:
   group: smc-live-signal-monitor
   cancel-in-progress: false
 
 jobs:
   execute_signal_pipeline:
-    name: Ingest, Analyze & Broadcast Signals
+    name: Ingest, Verify Model & Broadcast Signals
     runs-on: ubuntu-latest
     timeout-minutes: 8
+
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
-          python-version: "3.11"
+          python-version: "${{ env.PYTHON_VERSION }}"
           cache: "pip"
           cache-dependency-path: requirements-live.txt
 
       - name: Install Live Dependencies
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          pip install -r requirements-live.txt
+          python -m pip install -r requirements-live.txt
 
-      - name: Verify Model Artifacts
+      - name: Verify Repository Integrity
         run: |
-          test -f models/weights/latest_gru.pth
-          test -f models/weights/feature_scaler.joblib
-          test -f models/weights/model_metadata.json
+          set -euo pipefail
+          required_files=(
+            "core/__init__.py"
+            "models/__init__.py"
+            "utils/__init__.py"
+            "data/__init__.py"
+          )
+          for path in "${required_files[@]}"; do
+            if [[ ! -f "$path" ]]; then
+              echo "::error title=Repository integrity failure::$path is missing"
+              exit 1
+            fi
+          done
+
+      - name: Resolve Immutable Model Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_json="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName,isDraft,isPrerelease,publishedAt)"
+          tag="$(python -c 'import json,sys; print(json.load(sys.stdin)["tagName"])' <<< "$release_json")"
+          draft="$(python -c 'import json,sys; print(json.load(sys.stdin)["isDraft"])' <<< "$release_json")"
+          prerelease="$(python -c 'import json,sys; print(json.load(sys.stdin)["isPrerelease"])' <<< "$release_json")"
+          if [[ "$draft" != "False" || "$prerelease" != "False" ]]; then
+            echo "::error title=Invalid production model release::Latest release is draft or prerelease"
+            exit 1
+          fi
+          if [[ ! "$tag" =~ ^model-[A-Za-z0-9._-]+$ ]]; then
+            echo "::error title=Invalid model release tag::$tag"
+            exit 1
+          fi
+          echo "MODEL_RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "Resolved immutable model release: $tag"
+
+      - name: Download Immutable Model Artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf models/weights
+          mkdir -p models/weights
+          gh release download "$MODEL_RELEASE_TAG" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern 'latest_gru.pth' \
+            --pattern 'feature_scaler.joblib' \
+            --pattern 'model_metadata.json' \
+            --dir models/weights
+
+      - name: Verify Model Version and SHA-256 Integrity
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          base = Path("models/weights")
+          metadata_path = base / "model_metadata.json"
+          model_path = base / "latest_gru.pth"
+          scaler_path = base / "feature_scaler.joblib"
+
+          for path in (metadata_path, model_path, scaler_path):
+              if not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f"Missing or empty model artifact: {path}")
+
+          metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+          version = str(metadata.get("model_version", "")).strip()
+          if not version:
+              raise SystemExit("Model metadata does not contain model_version")
+
+          def sha256(path: Path) -> str:
+              digest = hashlib.sha256()
+              with path.open("rb") as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          actual_model_hash = sha256(model_path)
+          actual_scaler_hash = sha256(scaler_path)
+          expected_model_hash = str(metadata.get("model_sha256", "")).strip().lower()
+          expected_scaler_hash = str(metadata.get("scaler_sha256", "")).strip().lower()
+
+          if actual_model_hash != expected_model_hash:
+              raise SystemExit(
+                  "Model SHA-256 verification failed: "
+                  f"expected {expected_model_hash}, got {actual_model_hash}"
+              )
+          if actual_scaler_hash != expected_scaler_hash:
+              raise SystemExit(
+                  "Scaler SHA-256 verification failed: "
+                  f"expected {expected_scaler_hash}, got {actual_scaler_hash}"
+              )
+
+          print(f"Verified model version: {version}")
+          print(f"Verified model SHA-256: {actual_model_hash}")
+          print(f"Verified scaler SHA-256: {actual_scaler_hash}")
+          with open("$GITHUB_ENV", "a", encoding="utf-8") as env_file:
+              env_file.write(f"MODEL_VERSION={version}\n")
+          PY
 
       - name: Run Signal Engine
         env:
@@ -45,5 +149,4 @@ jobs:
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           EXCHANGE_PASSPHRASE: ${{ secrets.EXCHANGE_PASSPHRASE }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          PYTHONPATH: .
         run: python main.py
