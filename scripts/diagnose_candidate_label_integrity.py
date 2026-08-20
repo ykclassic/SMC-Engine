@@ -1,14 +1,13 @@
 """Diagnose SMC candidate, label, temporal, and separability integrity.
 
-This diagnostic is intentionally read-only with respect to model artifacts. It
-fetches the configured real-market dataset, reconstructs the exact production
-candidate/label pipeline, and writes a JSON report containing integrity and
-separability diagnostics for each configured symbol and the aggregate BTC/ETH
-training set.
+This diagnostic is intentionally read-only with respect to production model
+artifacts. It reconstructs the exact candidate/label pipeline and writes its
+report to an explicitly supplied research-artifact path.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 from typing import Any
@@ -20,8 +19,7 @@ from core.training_events import EVENT_DIRECTIONS, SMCTrainingEventBuilder
 from scripts.train_models import build_dataset, build_labeled_dataset, validate_candidates
 from utils.config_loader import load_all_configs
 
-
-REPORT_PATH = Path("models/weights/candidate_label_integrity.json")
+DEFAULT_REPORT_PATH = Path("artifacts/ai_research/candidate_label_integrity.json")
 
 
 def _finite_float(value: Any) -> float | None:
@@ -56,8 +54,6 @@ def _event_collision_report(candidates: pd.DataFrame) -> dict[str, Any]:
 
     discarded: dict[str, int] = {}
     for events in multi:
-        # Production validation keeps the first stable event for a duplicate
-        # directional key. Report all additional event types that are lost.
         for event in events[1:]:
             discarded[event] = discarded.get(event, 0) + 1
 
@@ -102,13 +98,11 @@ def _separability_report(labels: pd.DataFrame) -> dict[str, Any]:
     result: dict[str, Any] = {"overall": {}, "by_direction": {}, "by_event_type": {}, "by_distance": {}}
 
     def summarize(group: pd.DataFrame) -> dict[str, Any]:
-        positives = group.loc[group["label"] == 1.0]
-        negatives = group.loc[group["label"] == 0.0]
         return {
             "samples": int(len(group)),
             "positive_rate": float(group["label"].mean()),
-            "positive_count": int(len(positives)),
-            "negative_count": int(len(negatives)),
+            "positive_count": int((group["label"] == 1.0).sum()),
+            "negative_count": int((group["label"] == 0.0).sum()),
         }
 
     result["overall"] = summarize(labels)
@@ -121,30 +115,23 @@ def _separability_report(labels: pd.DataFrame) -> dict[str, Any]:
     return result
 
 
-def _future_overlap_report(labels: pd.DataFrame, split1: int, split2: int, horizon: int, frame_length: int) -> dict[str, Any]:
-    """Quantify labels whose future outcome window crosses a partition boundary."""
+def _future_overlap_report(
+    labels: pd.DataFrame,
+    split1: int,
+    split2: int,
+    horizon: int,
+    frame_length: int,
+) -> dict[str, Any]:
     train = labels.iloc[:split1]
     validation = labels.iloc[split1:split2]
     test = labels.iloc[split2:]
-
-    boundaries = {"train_validation": split1, "validation_test": split2}
-
-    def crossing(group: pd.DataFrame, boundary: int) -> pd.Series:
-        return group["candidate_index"].astype(int) < boundary, group["candidate_index"].astype(int) + horizon >= boundary
-
-    train_before, train_cross = crossing(train, split1)
-    validation_before, validation_cross = crossing(validation, split2)
-    _ = train_before, validation_before
-
-    # A candidate exactly at or after a boundary belongs to the later split;
-    # only candidates in the earlier split can leak their label outcome across it.
     train_cross_mask = train["candidate_index"].astype(int) + horizon >= split1
     validation_cross_mask = validation["candidate_index"].astype(int) + horizon >= split2
     test_horizon_truncated = test["candidate_index"].astype(int) + horizon >= frame_length
 
     return {
         "label_horizon": int(horizon),
-        "boundaries": boundaries,
+        "boundaries": {"train_validation": split1, "validation_test": split2},
         "train_labels_crossing_validation_boundary": int(train_cross_mask.sum()),
         "train_crossing_rate": float(train_cross_mask.mean()) if len(train) else 0.0,
         "validation_labels_crossing_test_boundary": int(validation_cross_mask.sum()),
@@ -159,14 +146,17 @@ def _symbol_report(frame: pd.DataFrame, labels: pd.DataFrame, config: dict) -> d
     horizon = int(model_cfg.get("label_horizon", 20))
     split1 = int(len(labels) * 0.70)
     split2 = int(len(labels) * 0.85)
-
-    # Reconstruct the raw candidate set independently so the report can
-    # quantify how much information is lost before labeling.
     builder = SMCTrainingEventBuilder(config)
     raw_candidates = builder.build(frame)
     canonical_candidates = validate_candidates(raw_candidates, len(frame))
-
-    event_count = int(sum(1 for row in frame.itertuples(index=False) for column in ("choch", "bos", "liquidity_sweep", "fvg", "ob_event") if getattr(row, column, None) in EVENT_DIRECTIONS))
+    event_count = int(
+        sum(
+            1
+            for row in frame.itertuples(index=False)
+            for column in ("choch", "bos", "liquidity_sweep", "fvg", "ob_event")
+            if getattr(row, column, None) in EVENT_DIRECTIONS
+        )
+    )
 
     return {
         "symbol": str(frame["symbol"].iloc[0]) if "symbol" in frame.columns else "UNKNOWN",
@@ -216,7 +206,7 @@ def _aggregate_report(symbol_reports: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def main() -> None:
+def main(output_path: Path = DEFAULT_REPORT_PATH) -> None:
     config = load_all_configs(require_notifications=False)
     frames = build_dataset(config)
     symbol_reports: list[dict[str, Any]] = []
@@ -243,10 +233,17 @@ def main() -> None:
         },
     }
 
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     print(json.dumps(report, indent=2, sort_keys=True))
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, default=DEFAULT_REPORT_PATH)
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    args = _parse_args()
+    main(args.output)
