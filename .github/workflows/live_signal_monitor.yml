@@ -55,9 +55,11 @@ jobs:
             "core/zones.py"
             "models/__init__.py"
             "models/signal.py"
+            "alerts/formatter.py"
             "utils/__init__.py"
             "utils/config_loader.py"
             "utils/journal.py"
+            "utils/event_dedup.py"
             "data/__init__.py"
             "data/exchange_api.py"
           )
@@ -86,6 +88,8 @@ jobs:
               Path("core/zones.py"),
               Path("data/exchange_api.py"),
               Path("alerts/discord_bot.py"),
+              Path("alerts/formatter.py"),
+              Path("utils/event_dedup.py"),
           )
 
           forbidden_imports = {"torch", "joblib", "models.inference"}
@@ -96,16 +100,35 @@ jobs:
               for node in ast.walk(tree):
                   if isinstance(node, ast.Import):
                       names = {alias.name for alias in node.names}
-                      violations.extend(f"{path}: import {name}" for name in names if name in forbidden_imports)
+                      violations.extend(
+                          f"{path}: import {name}"
+                          for name in names
+                          if name in forbidden_imports
+                      )
                   elif isinstance(node, ast.ImportFrom):
                       module = node.module or ""
                       if module in forbidden_imports:
-                          violations.append(f"{path}: from {module} import ...")
+                          violations.append(
+                              f"{path}: from {module} import ..."
+                          )
 
           if violations:
-              raise SystemExit("AI imports detected in production path:\n" + "\n".join(violations))
+              raise SystemExit(
+                  "AI imports detected in production path:\n"
+                  + "\n".join(violations)
+              )
 
-          print("Deterministic production boundary verified: no eager AI runtime import")
+          formatter_source = Path("alerts/formatter.py").read_text(
+              encoding="utf-8"
+          )
+          if "DETERMINISTIC SMC | AI DISABLED" not in formatter_source:
+              raise SystemExit(
+                  "Deterministic formatter must explicitly identify AI-disabled signals"
+              )
+
+          print("Deterministic production boundary verified")
+          print("Deterministic alert provenance verified")
+          print("Causal event deduplication module verified")
           PY
 
       - name: Verify Bitget Production Configuration
