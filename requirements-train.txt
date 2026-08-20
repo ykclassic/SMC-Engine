@@ -1,4 +1,12 @@
-# CPU-only PyTorch is selected by requirements-live.txt.
+# Research / training / AI test environment only.
+# This file must never be referenced by production live workflows.
 -r requirements-live.txt
+
+# ML / feature-engineering dependencies required by research modules and tests.
+torch==2.5.1
+joblib==1.4.2
+scikit-learn==1.5.2
+
+# Research / test tooling.
 pytest==8.3.3
 pytest-mock==3.14.0
