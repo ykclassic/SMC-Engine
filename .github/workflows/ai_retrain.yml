@@ -15,6 +15,17 @@ on:
         required: false
         default: true
         type: boolean
+  push:
+    paths:
+      - '.github/workflows/ai_retrain.yml'
+      - 'scripts/ablation_feature_groups.py'
+      - 'scripts/diagnose_candidate_label_integrity.py'
+      - 'scripts/train_models_integrity_unweighted.py'
+      - 'scripts/train_models_integrity.py'
+      - 'scripts/train_models.py'
+      - 'models/**'
+      - 'core/training_events.py'
+      - 'requirements-train.txt'
   schedule:
     - cron: "0 0 * * 6"
 
@@ -73,10 +84,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts/ai_research
-          python scripts/diagnose_candidate_label_integrity.py
-          if [[ -f models/weights/candidate_label_integrity.json ]]; then
-            cp models/weights/candidate_label_integrity.json artifacts/ai_research/
-          fi
+          python scripts/diagnose_candidate_label_integrity.py \
+            --output artifacts/ai_research/candidate_label_integrity.json
 
       - name: Run Controlled Ablation
         if: ${{ inputs.run_ablation != false }}
@@ -100,15 +109,31 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts/ai_research/training
-          python scripts/train_models_integrity_unweighted.py --experiment-mode
-          for path in \
-            models/weights/latest_gru.pth \
-            models/weights/feature_scaler.joblib \
-            models/weights/model_metadata.json; do
-            if [[ -s "$path" ]]; then
-              cp "$path" artifacts/ai_research/training/
+          python scripts/train_models_integrity_unweighted.py \
+            --experiment-mode \
+            --output artifacts/ai_research/training/training_experiment.json
+
+      - name: Verify Research Artifact Boundary
+        if: always()
+        run: |
+          set -euo pipefail
+
+          if [[ -d models/weights ]]; then
+            if find models/weights -type f -print -quit | grep -q .; then
+              echo "Research workflow wrote into production model-artifact boundary: models/weights"
+              find models/weights -type f -print
+              exit 1
             fi
-          done
+          fi
+
+          if git status --porcelain -- models/weights | grep -q .; then
+            echo "Research workflow modified the production model-artifact boundary"
+            git status --short -- models/weights
+            exit 1
+          fi
+
+          test -d artifacts/ai_research
+          echo "AI research artifact boundary verified: artifacts/ai_research only"
 
       - name: Verify Research Artifacts
         if: always()
@@ -145,6 +170,8 @@ jobs:
               json.dumps(manifest, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
+          if not manifest["artifacts"]:
+              raise SystemExit("No research artifacts were produced")
           print(json.dumps(manifest, indent=2, sort_keys=True))
           PY
 
@@ -153,7 +180,7 @@ jobs:
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
           name: ai-research-${{ github.sha }}
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
           path: artifacts/ai_research
 
@@ -166,7 +193,9 @@ jobs:
             echo "- Research only: true"
             echo "- Production dependency: false"
             echo "- Model promotion: disabled"
+            echo "- Production model-artifact boundary: untouched"
             echo "- Deterministic production baseline: untouched"
+            echo "- Research artifacts: \`artifacts/ai_research\`"
             echo "- Source commit: \`${GITHUB_SHA}\`"
             echo "- Workflow run: \`${GITHUB_RUN_ID}\`"
           } >> "$GITHUB_STEP_SUMMARY"
