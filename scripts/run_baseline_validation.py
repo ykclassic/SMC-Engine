@@ -121,6 +121,11 @@ def _run_symbol(
         if signal is None:
             continue
 
+        # Confluence creates a generic signal because it is reused by live and
+        # backtest callers. Bind the evaluated symbol at the artifact boundary
+        # so by-symbol reporting and outcome identity remain correct.
+        signal = replace(signal, symbol=symbol)
+
         signal_row = {
             "signal_id": _canonical_signal_id(symbol, signal.timestamp, signal.side),
             "timestamp": signal.timestamp,
