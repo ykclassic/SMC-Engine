@@ -88,7 +88,7 @@ jobs:
             --output artifacts/ai_research/candidate_label_integrity.json
 
       - name: Run Controlled Ablation
-        if: ${{ inputs.run_ablation != false }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_ablation }}
         env:
           ABLATION_EPOCHS: "20"
           ABLATION_SEED: "42"
@@ -101,7 +101,7 @@ jobs:
             --output artifacts/ai_research/ablation_results.json
 
       - name: Run Full AI Training Experiment
-        if: ${{ inputs.run_full_training != false }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_full_training }}
         env:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
