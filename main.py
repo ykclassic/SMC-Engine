@@ -12,6 +12,7 @@ from core.engine import SMCEngine
 from data.exchange_api import ExchangeInterface
 from models.signal import TradingSignal
 from utils.config_loader import load_all_configs
+from utils.event_dedup import has_signal_event
 from utils.journal import SignalJournal
 
 
@@ -33,6 +34,7 @@ def main() -> int:
         "candidates": 0,
         "signals_sent": 0,
         "duplicates_suppressed": 0,
+        "event_duplicates_suppressed": 0,
         "rejected": 0,
         "data_errors": 0,
         "delivery_errors": 0,
@@ -106,6 +108,36 @@ def main() -> int:
 
             signal = replace(signal, symbol=symbol)
             summary["candidates"] += 1
+
+            # A repeated scan can construct a fresh UUID for the same closed
+            # M15 sweep. Suppress that exact causal event before applying the
+            # broader same-side cooldown.
+            if has_signal_event(
+                journal.path,
+                signal.symbol,
+                signal.side,
+                signal.m15_trigger,
+                signal.timestamp,
+            ):
+                summary["event_duplicates_suppressed"] += 1
+                summary["duplicates_suppressed"] += 1
+                journal.record_scan(
+                    scan_id,
+                    signal.timestamp,
+                    symbol,
+                    "SUPPRESSED",
+                    "DUPLICATE_EVENT",
+                    diagnostic_payload,
+                )
+                logger.info(
+                    "Suppressed duplicate SMC event %s %s %s at %s",
+                    signal.symbol,
+                    signal.side,
+                    signal.m15_trigger,
+                    signal.timestamp,
+                )
+                continue
+
             if journal.has_recent_signal(symbol, signal.side, cooldown):
                 summary["duplicates_suppressed"] += 1
                 journal.record_scan(
